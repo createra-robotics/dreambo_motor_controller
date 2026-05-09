@@ -83,10 +83,8 @@ impl DreamboMotorController {
         reboot_timeout: Duration,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let faulty_ids: Vec<u8> = self.all_ids.to_vec();
-
         let name2id = self.get_motor_name_id();
-        let id2name: HashMap<u8, String> =
-            name2id.into_iter().map(|(name, id)| (id, name)).collect();
+        let id2name: HashMap<u8, String> = name2id.into_iter().map(|(name, id)| (id, name)).collect();
 
         for id in &faulty_ids {
             let name = id2name.get(id).unwrap();
