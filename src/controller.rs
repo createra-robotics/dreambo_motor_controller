@@ -2,13 +2,11 @@ use std::{collections::HashMap, time::Duration};
 use log::warn;
 use servocom::servo::feetech::{sm40bl, sts3025bl};
 
-pub const SM40BL_BAUD: u32 = 115_200;
-pub const STS3025BL_BAUD: u32 = 1000_000;
+pub const SERVO_BAUD: u32 = 1_000_000;
 
 pub struct DreamboMotorController {
-    fph: servocom::FeetechProtocolHandler,
-    serial_port: Box<dyn serialport::SerialPort>,
-    current_baud: u32,
+    protocol: servocom::FeetechProtocolHandler,
+    port: Box<dyn serialport::SerialPort>,
     all_ids: [u8; 7],
 }
 
@@ -19,8 +17,8 @@ const NOSE_IDS: [u8; 3] = [5, 6, 7];
 
 impl DreamboMotorController {
     pub fn new(serialport: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let fph = servocom::FeetechProtocolHandler::new();
-        let serial_port = serialport::new(serialport, SM40BL_BAUD)
+        let protocol = servocom::FeetechProtocolHandler::new();
+        let port = serialport::new(serialport, SERVO_BAUD)
             .timeout(Duration::from_millis(10))
             .open()?;
 
@@ -30,9 +28,8 @@ impl DreamboMotorController {
         ];
 
         Ok(Self {
-            fph,
-            serial_port,
-            current_baud: SM40BL_BAUD,
+            protocol,
+            port,
             all_ids,
         })
     }
@@ -49,35 +46,6 @@ impl DreamboMotorController {
         motor_id_name
     }
 
-    /// Reconfigure the UART baud rate if it differs from the requested one.
-    /// SM40BL and STS3025BL share one half-duplex bus but run at different
-    /// rates, so we switch on every cross-family transition.
-    fn switch_to_baud(&mut self, baud: u32) -> Result<(), Box<dyn std::error::Error>> {
-        if self.current_baud == baud {
-            return Ok(());
-        }
-        self.serial_port.set_baud_rate(baud)?;
-        let _ = self.serial_port.clear(serialport::ClearBuffer::Input);
-        self.current_baud = baud;
-        Ok(())
-    }
-
-    fn switch_to_arms(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_baud(SM40BL_BAUD)
-    }
-
-    fn switch_to_nose(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_baud(STS3025BL_BAUD)
-    }
-
-    fn switch_for_id(&mut self, id: u8) -> Result<(), Box<dyn std::error::Error>> {
-        if NOSE_IDS.contains(&id) {
-            self.switch_to_nose()
-        } else {
-            self.switch_to_arms()
-        }
-    }
-
     pub fn reboot(
         &mut self,
         reboot_timeout: Duration,
@@ -89,8 +57,7 @@ impl DreamboMotorController {
         for id in &faulty_ids {
             let name = id2name.get(id).unwrap();
             warn!("Rebooting motor {} (id={})", name, id);
-            self.switch_for_id(*id)?;
-            self.fph.reboot(self.serial_port.as_mut(), *id)?;
+            self.protocol.reboot(self.port.as_mut(), *id)?;
         }
 
         let mut missing_ids = faulty_ids.clone();
@@ -100,10 +67,7 @@ impl DreamboMotorController {
             missing_ids = missing_ids
                 .into_iter()
                 .filter(|id| {
-                    if self.switch_for_id(*id).is_err() {
-                        return true;
-                    }
-                    let ping_result = self.fph.ping(self.serial_port.as_mut(), *id);
+                    let ping_result = self.protocol.ping(self.port.as_mut(), *id);
                     match ping_result {
                         Ok(res) => !res,
                         Err(_) => true,
@@ -138,8 +102,7 @@ impl DreamboMotorController {
         let mut missing_ids = Vec::new();
 
         for id in self.all_ids {
-            self.switch_for_id(id)?;
-            match self.fph.ping(self.serial_port.as_mut(), id) {
+            match self.protocol.ping(self.port.as_mut(), id) {
                 Ok(true) => {}
                 _ => missing_ids.push(id),
             }
@@ -152,16 +115,14 @@ impl DreamboMotorController {
     /// Returns an array of 7 voltages (in 0.1V units) in the following order:
     /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
     pub fn read_all_voltages(&mut self) -> Result<[u8; 7], Box<dyn std::error::Error>> {
-        self.switch_to_arms()?;
         let arm_volts = sm40bl::sync_read_present_voltage(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &ARM_IDS,
         )?;
-        self.switch_to_nose()?;
         let nose_volts = sts3025bl::sync_read_present_voltage(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &NOSE_IDS,
         )?;
 
@@ -175,16 +136,14 @@ impl DreamboMotorController {
     /// Returns an array of 7 positions in the following order:
     /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
     pub fn read_all_positions(&mut self) -> Result<[f64; 7], Box<dyn std::error::Error>> {
-        self.switch_to_arms()?;
         let arm_pos = sm40bl::sync_read_present_position(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &ARM_IDS,
         )?;
-        self.switch_to_nose()?;
         let nose_pos = sts3025bl::sync_read_present_position(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &NOSE_IDS,
         )?;
 
@@ -201,17 +160,15 @@ impl DreamboMotorController {
         &mut self,
         positions: [f64; 7],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_arms()?;
         sm40bl::sync_write_goal_position(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &ARM_IDS,
             &[positions[0], positions[1], positions[2], positions[3]],
         )?;
-        self.switch_to_nose()?;
         sts3025bl::sync_write_goal_position(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &NOSE_IDS,
             &[positions[4], positions[5], positions[6]],
         )?;
@@ -222,10 +179,9 @@ impl DreamboMotorController {
         &mut self,
         position: [f64; 2],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_arms()?;
         sm40bl::sync_write_goal_position(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &LEFT_ARM_IDS,
             &position,
         )?;
@@ -236,10 +192,9 @@ impl DreamboMotorController {
         &mut self,
         position: [f64; 2],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_arms()?;
         sm40bl::sync_write_goal_position(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &RIGHT_ARM_IDS,
             &position,
         )?;
@@ -250,10 +205,9 @@ impl DreamboMotorController {
         &mut self,
         position: [f64; 4],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_arms()?;
         sm40bl::sync_write_goal_position(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &ARM_IDS,
             &position,
         )?;
@@ -264,10 +218,9 @@ impl DreamboMotorController {
         &mut self,
         position: [f64; 3],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_nose()?;
         sts3025bl::sync_write_goal_position(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &NOSE_IDS,
             &position,
         )?;
@@ -275,16 +228,14 @@ impl DreamboMotorController {
     }
 
     pub fn is_torque_enabled(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
-        self.switch_to_arms()?;
         let arm_torque = sm40bl::sync_read_torque_enable(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &ARM_IDS,
         )?;
-        self.switch_to_nose()?;
         let nose_torque = sts3025bl::sync_read_torque_enable(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &NOSE_IDS,
         )?;
 
@@ -308,10 +259,9 @@ impl DreamboMotorController {
     }
 
     pub fn enable_arms(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_arms()?;
         sm40bl::sync_write_torque_enable(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &ARM_IDS,
             &[enable; 4],
         )?;
@@ -319,10 +269,9 @@ impl DreamboMotorController {
     }
 
     pub fn enable_nose(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_nose()?;
         sts3025bl::sync_write_torque_enable(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &NOSE_IDS,
             &[enable; 3],
         )?;
@@ -330,17 +279,15 @@ impl DreamboMotorController {
     }
 
     fn set_torque(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_to_arms()?;
         sm40bl::sync_write_torque_enable(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &ARM_IDS,
             &[enable; 4],
         )?;
-        self.switch_to_nose()?;
         sts3025bl::sync_write_torque_enable(
-            &self.fph,
-            self.serial_port.as_mut(),
+            &self.protocol,
+            self.port.as_mut(),
             &NOSE_IDS,
             &[enable; 3],
         )?;
@@ -356,20 +303,18 @@ impl DreamboMotorController {
 
         if !arm_targets.is_empty() {
             let enables = vec![enable; arm_targets.len()];
-            self.switch_to_arms()?;
             sm40bl::sync_write_torque_enable(
-                &self.fph,
-                self.serial_port.as_mut(),
+                &self.protocol,
+                self.port.as_mut(),
                 &arm_targets,
                 &enables,
             )?;
         }
         if !nose_targets.is_empty() {
             let enables = vec![enable; nose_targets.len()];
-            self.switch_to_nose()?;
             sts3025bl::sync_write_torque_enable(
-                &self.fph,
-                self.serial_port.as_mut(),
+                &self.protocol,
+                self.port.as_mut(),
                 &nose_targets,
                 &enables,
             )?;
@@ -383,8 +328,7 @@ impl DreamboMotorController {
         address: u8,
         length: u8,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        self.switch_for_id(id)?;
-        self.fph.read(self.serial_port.as_mut(), id, address, length)
+        self.protocol.read(self.port.as_mut(), id, address, length)
     }
 
     pub fn write_raw_bytes(
@@ -393,23 +337,22 @@ impl DreamboMotorController {
         address: u8,
         data: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.switch_for_id(id)?;
-        self.fph
-            .write(self.serial_port.as_mut(), id, address, data)
+        self.protocol
+            .write(self.port.as_mut(), id, address, data)
     }
 
     pub fn write_raw_packet(&mut self, data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        self.serial_port.write_all(data)?;
-        self.serial_port.flush()?;
+        self.port.write_all(data)?;
+        self.port.flush()?;
 
-        let mut n = self.serial_port.bytes_to_read()? as usize;
+        let mut n = self.port.bytes_to_read()? as usize;
         let start = std::time::Instant::now();
         while n == 0 && start.elapsed() < Duration::from_millis(10) {
             std::thread::sleep(Duration::from_millis(5));
-            n = self.serial_port.bytes_to_read()? as usize;
+            n = self.port.bytes_to_read()? as usize;
         }
         let mut buff = vec![0u8; n];
-        self.serial_port.read_exact(&mut buff)?;
+        self.port.read_exact(&mut buff)?;
 
         Ok(buff)
     }
