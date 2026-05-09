@@ -7,11 +7,8 @@ name: Python Bindings CI
 
 on:
   push:
-    branches:
-      - main
-      - master
     tags:
-      - '*'
+      - 'v*'
   pull_request:
   workflow_dispatch:
 
@@ -198,7 +195,7 @@ jobs:
         with:
           subject-path: 'wheels-*/*'
       - name: Publish to PyPI
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: PyO3/maturin-action@v1
         #env:
           #MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
