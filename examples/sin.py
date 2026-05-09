@@ -1,9 +1,9 @@
 import numpy as np
 import time
-from dreambo_servo_controller import DreamboServoController
+from dreambo_motor_controller import DreamboMotorController
 
 def main():
-    c = DreamboServoController(serialport="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79034031-if00")
+    c = DreamboMotorController(serialport="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79034031-if00")
 
     c.enable_torque()
 
@@ -16,7 +16,7 @@ def main():
         t = time.time() - t0
         pos = amp * np.sin(2 * np.pi * freq * t)
 
-        c.set_all_goal_positions([pos] * 9)
+        c.set_all_goal_positions([pos] * 7)
 
         cur = c.read_all_positions()
 

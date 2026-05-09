@@ -2,13 +2,13 @@ import time
 from datetime import timedelta
 
 import numpy as np
-from dreambo_servo_controller import FullBodyPosition, DreamboPyControlLoop
+from dreambo_motor_controller import DreamboTorsoPosition, DreamboPyControlLoop
 
 
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Reachy Mini Control Loop Benchmark")
+    parser = argparse.ArgumentParser(description="Dreambo Control Loop Benchmark")
     parser.add_argument(
         "--port",
         type=str,
@@ -46,8 +46,8 @@ def main():
     while True:
         t = time.time() - sin_t0
         target = np.sin(2 * np.pi * 0.25 * t) * np.deg2rad(10)
-        pos = FullBodyPosition(
-            body_yaw=target, stewart=[target] * 6, antennas=[target] * 2
+        pos = DreamboTorsoPosition(
+            left_arm=[target] * 2, right_arm=[target] * 2, nose=[target] * 3
         )
 
         control_loop.set_all_goal_positions(pos)

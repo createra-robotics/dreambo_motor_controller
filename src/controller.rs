@@ -1,88 +1,88 @@
 use std::{collections::HashMap, time::Duration};
 use log::warn;
-use rustypot::servo::dynamixel::xl330;
+use servocom::servo::feetech::{sm40bl, sts3025bl};
 
-pub struct DreamboServoController {
-    dph_v2: rustypot::DynamixelProtocolHandler,
+pub const SM40BL_BAUD: u32 = 115_200;
+pub const STS3025BL_BAUD: u32 = 1000_000;
+
+pub struct DreamboMotorController {
+    fph: servocom::FeetechProtocolHandler,
     serial_port: Box<dyn serialport::SerialPort>,
-    all_ids: [u8; 9],
+    current_baud: u32,
+    all_ids: [u8; 7],
 }
 
-const EAR_IDS: [u8; 2] = [17, 18]; // Right and Left antennas
-const STEWART_PLATFORM_IDS: [u8; 6] = [11, 12, 13, 14, 15, 16];
-const BODY_ROTATION_ID: u8 = 10;
+const LEFT_ARM_IDS: [u8; 2] = [1, 2]; // pitch, yaw
+const RIGHT_ARM_IDS: [u8; 2] = [3, 4]; // pitch, yaw
+const ARM_IDS: [u8; 4] = [1, 2, 3, 4];
+const NOSE_IDS: [u8; 3] = [5, 6, 7];
 
-impl DreamboServoController {
+impl DreamboMotorController {
     pub fn new(serialport: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let dph_v2 = rustypot::DynamixelProtocolHandler::v2();
-        let serial_port = serialport::new(serialport, 1_000_000)
+        let fph = servocom::FeetechProtocolHandler::new();
+        let serial_port = serialport::new(serialport, SM40BL_BAUD)
             .timeout(Duration::from_millis(10))
             .open()?;
 
         let all_ids = [
-            BODY_ROTATION_ID,
-            STEWART_PLATFORM_IDS[0],
-            STEWART_PLATFORM_IDS[1],
-            STEWART_PLATFORM_IDS[2],
-            STEWART_PLATFORM_IDS[3],
-            STEWART_PLATFORM_IDS[4],
-            STEWART_PLATFORM_IDS[5],
-            EAR_IDS[0],
-            EAR_IDS[1],
+            ARM_IDS[0], ARM_IDS[1], ARM_IDS[2], ARM_IDS[3],
+            NOSE_IDS[0], NOSE_IDS[1], NOSE_IDS[2],
         ];
 
         Ok(Self {
-            dph_v2,
+            fph,
             serial_port,
+            current_baud: SM40BL_BAUD,
             all_ids,
         })
     }
 
     pub fn get_motor_name_id(&self) -> HashMap<String, u8> {
         let mut motor_id_name = HashMap::new();
-        motor_id_name.insert("body_rotation".to_string(), BODY_ROTATION_ID);
-        motor_id_name.insert("stewart_1".to_string(), STEWART_PLATFORM_IDS[0]);
-        motor_id_name.insert("stewart_2".to_string(), STEWART_PLATFORM_IDS[1]);
-        motor_id_name.insert("stewart_3".to_string(), STEWART_PLATFORM_IDS[2]);
-        motor_id_name.insert("stewart_4".to_string(), STEWART_PLATFORM_IDS[3]);
-        motor_id_name.insert("stewart_5".to_string(), STEWART_PLATFORM_IDS[4]);
-        motor_id_name.insert("stewart_6".to_string(), STEWART_PLATFORM_IDS[5]);
-        motor_id_name.insert("right_antenna".to_string(), EAR_IDS[0]);
-        motor_id_name.insert("left_antenna".to_string(), EAR_IDS[1]);
+        motor_id_name.insert("left_arm_pitch".to_string(), LEFT_ARM_IDS[0]);
+        motor_id_name.insert("left_arm_yaw".to_string(), LEFT_ARM_IDS[1]);
+        motor_id_name.insert("right_arm_pitch".to_string(), RIGHT_ARM_IDS[0]);
+        motor_id_name.insert("right_arm_yaw".to_string(), RIGHT_ARM_IDS[1]);
+        motor_id_name.insert("nose_0".to_string(), NOSE_IDS[0]);
+        motor_id_name.insert("nose_1".to_string(), NOSE_IDS[1]);
+        motor_id_name.insert("nose_2".to_string(), NOSE_IDS[2]);
         motor_id_name
+    }
+
+    /// Reconfigure the UART baud rate if it differs from the requested one.
+    /// SM40BL and STS3025BL share one half-duplex bus but run at different
+    /// rates, so we switch on every cross-family transition.
+    fn switch_to_baud(&mut self, baud: u32) -> Result<(), Box<dyn std::error::Error>> {
+        if self.current_baud == baud {
+            return Ok(());
+        }
+        self.serial_port.set_baud_rate(baud)?;
+        let _ = self.serial_port.clear(serialport::ClearBuffer::Input);
+        self.current_baud = baud;
+        Ok(())
+    }
+
+    fn switch_to_arms(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.switch_to_baud(SM40BL_BAUD)
+    }
+
+    fn switch_to_nose(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.switch_to_baud(STS3025BL_BAUD)
+    }
+
+    fn switch_for_id(&mut self, id: u8) -> Result<(), Box<dyn std::error::Error>> {
+        if NOSE_IDS.contains(&id) {
+            self.switch_to_nose()
+        } else {
+            self.switch_to_arms()
+        }
     }
 
     pub fn reboot(
         &mut self,
-        on_error_status_only: bool,
         reboot_timeout: Duration,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut error_status = Vec::new();
-
-        if on_error_status_only {
-            error_status = xl330::sync_read_hardware_error_status(
-                &self.dph_v2,
-                self.serial_port.as_mut(),
-                &self.all_ids,
-            )?;
-        }
-
-        let faulty_ids: Vec<u8> = if on_error_status_only {
-            self.all_ids
-                .iter()
-                .zip(error_status.iter())
-                // Ignore input voltage error (status == 1) for reboot decision.
-                .filter_map(|(&id, &status)| {
-                    if status != 0 && status != 1 {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            self.all_ids.to_vec()
-        };
+        let faulty_ids: Vec<u8> = self.all_ids.to_vec();
 
         let name2id = self.get_motor_name_id();
         let id2name: HashMap<u8, String> =
@@ -91,7 +91,8 @@ impl DreamboServoController {
         for id in &faulty_ids {
             let name = id2name.get(id).unwrap();
             warn!("Rebooting motor {} (id={})", name, id);
-            self.dph_v2.reboot(self.serial_port.as_mut(), *id as u8)?;
+            self.switch_for_id(*id)?;
+            self.fph.reboot(self.serial_port.as_mut(), *id)?;
         }
 
         let mut missing_ids = faulty_ids.clone();
@@ -101,7 +102,10 @@ impl DreamboServoController {
             missing_ids = missing_ids
                 .into_iter()
                 .filter(|id| {
-                    let ping_result = self.dph_v2.ping(self.serial_port.as_mut(), *id);
+                    if self.switch_for_id(*id).is_err() {
+                        return true;
+                    }
+                    let ping_result = self.fph.ping(self.serial_port.as_mut(), *id);
                     match ping_result {
                         Ok(res) => !res,
                         Err(_) => true,
@@ -136,8 +140,10 @@ impl DreamboServoController {
         let mut missing_ids = Vec::new();
 
         for id in self.all_ids {
-            if xl330::read_id(&self.dph_v2, self.serial_port.as_mut(), id).is_err() {
-                missing_ids.push(id);
+            self.switch_for_id(id)?;
+            match self.fph.ping(self.serial_port.as_mut(), id) {
+                Ok(true) => {}
+                _ => missing_ids.push(id),
             }
         }
 
@@ -145,94 +151,146 @@ impl DreamboServoController {
     }
 
     /// Read the current input voltage of all servos.
-    /// Returns an array of 9 input voltages in the following order:
-    /// [body_rotation, stewart_1, stewart_2, stewart_3, stewart_4, stewart_5, stewart_6, antenna_right, antenna_left]
-    pub fn read_all_voltages(&mut self) -> Result<[u16; 9], Box<dyn std::error::Error>> {
-        let volt = xl330::sync_read_present_input_voltage(
-            &self.dph_v2,
+    /// Returns an array of 7 voltages (in 0.1V units) in the following order:
+    /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
+    pub fn read_all_voltages(&mut self) -> Result<[u8; 7], Box<dyn std::error::Error>> {
+        self.switch_to_arms()?;
+        let arm_volts = sm40bl::sync_read_present_voltage(
+            &self.fph,
             self.serial_port.as_mut(),
-            &self.all_ids,
+            &ARM_IDS,
         )?;
-        
-        volt.try_into()
-            .map_err(|_| "Invalid voltage array length: expected 9 elements".into())
+        self.switch_to_nose()?;
+        let nose_volts = sts3025bl::sync_read_present_voltage(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &NOSE_IDS,
+        )?;
+
+        Ok([
+            arm_volts[0], arm_volts[1], arm_volts[2], arm_volts[3],
+            nose_volts[0], nose_volts[1], nose_volts[2],
+        ])
     }
-        
 
     /// Read the current position of all servos.
-    /// Returns an array of 9 positions in the following order:
-    /// [body_rotation, stewart_1, stewart_2, stewart_3, stewart_4, stewart_5, stewart_6, antenna_right, antenna_left]
-    pub fn read_all_positions(&mut self) -> Result<[f64; 9], Box<dyn std::error::Error>> {
-        let pos = xl330::sync_read_present_position(
-            &self.dph_v2,
+    /// Returns an array of 7 positions in the following order:
+    /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
+    pub fn read_all_positions(&mut self) -> Result<[f64; 7], Box<dyn std::error::Error>> {
+        self.switch_to_arms()?;
+        let arm_pos = sm40bl::sync_read_present_position(
+            &self.fph,
             self.serial_port.as_mut(),
-            &self.all_ids,
+            &ARM_IDS,
         )?;
-        
-        pos.try_into()
-            .map_err(|_| "Invalid position array length: expected 9 elements".into())
+        self.switch_to_nose()?;
+        let nose_pos = sts3025bl::sync_read_present_position(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &NOSE_IDS,
+        )?;
+
+        Ok([
+            arm_pos[0], arm_pos[1], arm_pos[2], arm_pos[3],
+            nose_pos[0], nose_pos[1], nose_pos[2],
+        ])
     }
 
     /// Set the goal position of all servos.
     /// The positions array must be in the following order:
-    /// [body_rotation, stewart_1, stewart_2, stewart_3, stewart_4, stewart_5, stewart_6, antenna_right, antenna_left]
+    /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
     pub fn set_all_goal_positions(
         &mut self,
-        positions: [f64; 9],
+        positions: [f64; 7],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_goal_position(
-            &self.dph_v2,
+        self.switch_to_arms()?;
+        sm40bl::sync_write_goal_position(
+            &self.fph,
             self.serial_port.as_mut(),
-            &self.all_ids,
-            &positions,
+            &ARM_IDS,
+            &[positions[0], positions[1], positions[2], positions[3]],
         )?;
-
+        self.switch_to_nose()?;
+        sts3025bl::sync_write_goal_position(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &NOSE_IDS,
+            &[positions[4], positions[5], positions[6]],
+        )?;
         Ok(())
     }
 
-    pub fn set_antennas_positions(
+    pub fn set_left_arm_position(
         &mut self,
-        positions: [f64; 2],
+        position: [f64; 2],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_goal_position(
-            &self.dph_v2,
+        self.switch_to_arms()?;
+        sm40bl::sync_write_goal_position(
+            &self.fph,
             self.serial_port.as_mut(),
-            &EAR_IDS,
-            &positions,
-        )?;
-
-        Ok(())
-    }
-
-    pub fn set_stewart_platform_position(
-        &mut self,
-        position: [f64; 6],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_goal_position(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &STEWART_PLATFORM_IDS,
+            &LEFT_ARM_IDS,
             &position,
         )?;
-
         Ok(())
     }
-    pub fn set_body_rotation(&mut self, position: f64) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_goal_position(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &[BODY_ROTATION_ID],
-            &[position],
-        )?;
 
+    pub fn set_right_arm_position(
+        &mut self,
+        position: [f64; 2],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.switch_to_arms()?;
+        sm40bl::sync_write_goal_position(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &RIGHT_ARM_IDS,
+            &position,
+        )?;
+        Ok(())
+    }
+
+    pub fn set_arms_position(
+        &mut self,
+        position: [f64; 4],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.switch_to_arms()?;
+        sm40bl::sync_write_goal_position(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &ARM_IDS,
+            &position,
+        )?;
+        Ok(())
+    }
+
+    pub fn set_nose_position(
+        &mut self,
+        position: [f64; 3],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.switch_to_nose()?;
+        sts3025bl::sync_write_goal_position(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &NOSE_IDS,
+            &position,
+        )?;
         Ok(())
     }
 
     pub fn is_torque_enabled(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
-        let xl_torque =
-            xl330::sync_read_torque_enable(&self.dph_v2, self.serial_port.as_mut(), &self.all_ids)?;
+        self.switch_to_arms()?;
+        let arm_torque = sm40bl::sync_read_torque_enable(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &ARM_IDS,
+        )?;
+        self.switch_to_nose()?;
+        let nose_torque = sts3025bl::sync_read_torque_enable(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &NOSE_IDS,
+        )?;
 
-        Ok(xl_torque.iter().all(|&x| x))
+        Ok(arm_torque.iter().chain(nose_torque.iter()).all(|&x| x))
     }
 
     pub fn enable_torque(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -251,14 +309,43 @@ impl DreamboServoController {
         self.set_torque_on_ids(ids, false)
     }
 
-    fn set_torque(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_torque_enable(
-            &self.dph_v2,
+    pub fn enable_arms(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
+        self.switch_to_arms()?;
+        sm40bl::sync_write_torque_enable(
+            &self.fph,
             self.serial_port.as_mut(),
-            &self.all_ids,
-            &[enable; 9],
+            &ARM_IDS,
+            &[enable; 4],
         )?;
+        Ok(())
+    }
 
+    pub fn enable_nose(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
+        self.switch_to_nose()?;
+        sts3025bl::sync_write_torque_enable(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &NOSE_IDS,
+            &[enable; 3],
+        )?;
+        Ok(())
+    }
+
+    fn set_torque(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
+        self.switch_to_arms()?;
+        sm40bl::sync_write_torque_enable(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &ARM_IDS,
+            &[enable; 4],
+        )?;
+        self.switch_to_nose()?;
+        sts3025bl::sync_write_torque_enable(
+            &self.fph,
+            self.serial_port.as_mut(),
+            &NOSE_IDS,
+            &[enable; 3],
+        )?;
         Ok(())
     }
 
@@ -267,127 +354,28 @@ impl DreamboServoController {
         ids: &[u8],
         enable: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let enables = vec![enable; ids.len()];
-        xl330::sync_write_torque_enable(&self.dph_v2, self.serial_port.as_mut(), ids, &enables)?;
+        let (arm_targets, nose_targets) = split_ids_by_family(ids);
 
-        Ok(())
-    }
-
-    pub fn set_stewart_platform_goal_current(
-        &mut self,
-        current: [i16; 6],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_goal_current(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &STEWART_PLATFORM_IDS,
-            &current,
-        )?;
-
-        Ok(())
-    }
-
-    pub fn read_stewart_platform_current(
-        &mut self,
-    ) -> Result<[i16; 6], Box<dyn std::error::Error>> {
-        let currents = xl330::sync_read_present_current(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &STEWART_PLATFORM_IDS,
-        )?;
-
-        currents.try_into()
-            .map_err(|_| "Invalid current array length: expected 6 elements".into())
-    }
-
-    pub fn set_stewart_platform_operating_mode(
-        &mut self,
-        mode: u8,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_operating_mode(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &STEWART_PLATFORM_IDS,
-            &[mode; 6],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn read_stewart_platform_operating_mode(
-        &mut self,
-    ) -> Result<[u8; 6], Box<dyn std::error::Error>> {
-        let modes = xl330::sync_read_operating_mode(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &STEWART_PLATFORM_IDS,
-        )?;
-
-        modes.try_into()
-            .map_err(|_| "Invalid mode array length: expected 6 elements".into())
-    }
-
-    pub fn set_antennas_operating_mode(
-        &mut self,
-        mode: u8,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_operating_mode(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &EAR_IDS,
-            &[mode; 2],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn set_body_rotation_operating_mode(
-        &mut self,
-        mode: u8,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_operating_mode(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &[BODY_ROTATION_ID],
-            &[mode],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn enable_body_rotation(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_torque_enable(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &[BODY_ROTATION_ID],
-            &[enable],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn enable_antennas(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_torque_enable(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &EAR_IDS,
-            &[enable; 2],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn enable_stewart_platform(
-        &mut self,
-        enable: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        xl330::sync_write_torque_enable(
-            &self.dph_v2,
-            self.serial_port.as_mut(),
-            &STEWART_PLATFORM_IDS,
-            &[enable; 6],
-        )?;
-
+        if !arm_targets.is_empty() {
+            let enables = vec![enable; arm_targets.len()];
+            self.switch_to_arms()?;
+            sm40bl::sync_write_torque_enable(
+                &self.fph,
+                self.serial_port.as_mut(),
+                &arm_targets,
+                &enables,
+            )?;
+        }
+        if !nose_targets.is_empty() {
+            let enables = vec![enable; nose_targets.len()];
+            self.switch_to_nose()?;
+            sts3025bl::sync_write_torque_enable(
+                &self.fph,
+                self.serial_port.as_mut(),
+                &nose_targets,
+                &enables,
+            )?;
+        }
         Ok(())
     }
 
@@ -397,8 +385,8 @@ impl DreamboServoController {
         address: u8,
         length: u8,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        self.dph_v2
-            .read(self.serial_port.as_mut(), id, address, length)
+        self.switch_for_id(id)?;
+        self.fph.read(self.serial_port.as_mut(), id, address, length)
     }
 
     pub fn write_raw_bytes(
@@ -407,7 +395,8 @@ impl DreamboServoController {
         address: u8,
         data: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.dph_v2
+        self.switch_for_id(id)?;
+        self.fph
             .write(self.serial_port.as_mut(), id, address, data)
     }
 
@@ -426,4 +415,17 @@ impl DreamboServoController {
 
         Ok(buff)
     }
+}
+
+fn split_ids_by_family(ids: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut arms = Vec::new();
+    let mut nose = Vec::new();
+    for &id in ids {
+        if ARM_IDS.contains(&id) {
+            arms.push(id);
+        } else if NOSE_IDS.contains(&id) {
+            nose.push(id);
+        }
+    }
+    (arms, nose)
 }

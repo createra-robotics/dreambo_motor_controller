@@ -2,8 +2,8 @@ use std::{f64::consts::PI, thread::sleep, time::Duration};
 
 // Create args struct
 use clap::Parser;
-use dreambo_servo_controller::control_loop::{
-    FullBodyPosition, MotorCommand, DreamboControlLoop,
+use dreambo_motor_controller::control_loop::{
+    DreamboControlLoop, DreamboTorsoPosition, MotorCommand,
 };
 
 #[derive(Parser, Debug)]
@@ -51,10 +51,10 @@ fn main() {
 
         loop_controller
             .push_command(MotorCommand::SetAllGoalPositions {
-                positions: FullBodyPosition {
-                    body_yaw: target_pos,
-                    antennas: [target_pos; 2],
-                    stewart: [target_pos; 6],
+                positions: DreamboTorsoPosition {
+                    left_arm: [target_pos; 2],
+                    right_arm: [target_pos; 2],
+                    nose: [target_pos; 3],
                     timestamp: 0.0,
                 },
             })

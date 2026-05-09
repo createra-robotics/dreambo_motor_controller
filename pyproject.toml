@@ -3,7 +3,7 @@ requires = ["maturin==1.9.4"]
 build-backend = "maturin"
 
 [project]
-name = "dreambo_servo_controller"
+name = "dreambo_motor_controller"
 requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",

@@ -1,5 +1,5 @@
 mod controller;
-pub use controller::DreamboServoController;
+pub use controller::{DreamboMotorController, SM40BL_BAUD, STS3025BL_BAUD};
 
 pub mod bindings;
 

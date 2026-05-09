@@ -1,33 +1,14 @@
 use std::{thread::sleep, time::Duration};
-use dreambo_servo_controller::DreamboServoController;
+use dreambo_motor_controller::DreamboMotorController;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let serial_port = "/dev/ttyACM0"; // Adjust this to your serial port
     let serial_port = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79034031-if00";
-    let mut c = DreamboServoController::new(serial_port)?;
+    let mut c = DreamboMotorController::new(serial_port)?;
 
-    let lower = [
-        0.0015339807878858025,
-        3.0434178831651124,
-        -3.043417883165112,
-        -0.8620972027917304,
-        0.7608544707912781,
-        -0.3758252930319821,
-        0.3221359654559848,
-        -0.7470486437003072,
-        0.7930680673368764,
-    ];
-    let upper = [
-        -0.004601942363656963,
-        3.0434178831651124,
-        -3.043417883165112,
-        0.44792239006260726,
-        -0.44945637085049306,
-        0.5829126993965437,
-        -0.5062136600022615,
-        0.37889325460775325,
-        -0.4862719097597483,
-    ];
+    // [left_pitch, left_yaw, right_pitch, right_yaw, nose_0, nose_1, nose_2]
+    let lower = [-0.5, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0];
+    let upper = [0.5, 0.0, 0.5, 0.0, 0.2, -0.2, 0.2];
 
     c.enable_torque()?;
 

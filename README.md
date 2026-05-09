@@ -1,4 +1,4 @@
-# Dreambo Robot Servo Controller
+# Dreambo Robot Motor Controller
 
 Handles communication with the gimbal-driven spherical joint arms (FEETECH SM40BL x 4), eyes, nose, eyelid, eyebrow, ears and tail (FEETECH STS3025BL x 12).
 Also provides a python binding available via pip.
@@ -7,24 +7,33 @@ Also provides a python binding available via pip.
 
 Install [Dreambo Servo Wizard](https://github.com/createra-robotics/dreambo_servo_wizard) and rename all the servo IDs.
 
-- Left Arm Pitch: 1
-- Left Arm Yaw: 2
-- Right Arm Pitch: 3
-- Right Arm Yaw: 4
-- Nose[0]: 5
-- Nose[1]: 6
-- Nose[2]: 7
-- Left Eyeball Yaw: 8
-- Right Eyeball Yaw: 9
-- Eyes Pitch: 10
-- Eyelid Pitch: 11
-- Eyebrow Pitch: 12
-- Left Ear Pitch: 13
-- Right Ear Pitch: 14
-- Tail Pitch: 15
-- Tail Yaw: 16
+- Gimbal-driven spherical joint arms: all servos are SM40BL
+  * Left Arm Pitch Servo ID: 1
+  * Left Arm Yaw Servo ID: 2
+  * Right Arm Pitch Servo ID: 3
+  * Right Arm Yaw Servo ID: 4
+
+- Logarithmic spiral-shaped robotic nose: all servos are STS3025BL
+  * Nose[0] Servo ID: 5
+  * Nose[1] Servo ID: 6
+  * Nose[2] Servo ID: 7
+
+- Coming soon:
+  - Left Eyeball Yaw Servo ID: 8
+  - Right Eyeball Yaw Servo ID: 9
+  - Eyes Pitch Servo ID: 10
+  - Eyelid Pitch Servo ID: 11
+  - Eyebrow Pitch Servo ID: 12
+  - Left Ear Pitch: 13
+  - Right Ear Pitch: 14
+  - Tail Pitch: 15
+  - Tail Yaw: 16
+  - Neck Yaw: DM-J4310-2EC
+  - Neck Pitch: DM-J4340P-2EC
+  - Neck Roll: DM-J4340P-2EC
 
 ## To install locally 
+
 ```bash
 pip install maturin
 ```
@@ -38,6 +47,27 @@ pip install -e . --verbose
 
 ```bash
 cd `target/wheels`
-pip install dreambo_servo_controller...
+pip install dreambo_motor_controller...
+```
+
+## Quickstart (Python)
+
+```python
+from dreambo_motor_controller import DreamboMotorController
+
+c = DreamboMotorController(serialport="/dev/ttyACM0")
+c.enable_torque()
+
+# 7 positions: [left_arm_pitch, left_arm_yaw,
+#               right_arm_pitch, right_arm_yaw,
+#               nose_0, nose_1, nose_2]
+c.set_all_goal_positions([0.0] * 7)
+
+# Or drive groups individually
+c.set_left_arm_position([0.1, 0.0])
+c.set_right_arm_position([-0.1, 0.0])
+c.set_nose_position([0.0, 0.0, 0.0])
+
+print(c.read_all_positions())
 ```
 

@@ -8,23 +8,28 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
 use tokio::{
     sync::mpsc::{self, Sender},
     time,
 };
 
-use crate::DreamboServoController;
+use crate::DreamboMotorController;
+
+/// Minimum input voltage (in 0.1V units) required before the control loop
+/// considers the rail stable. SM40BL and STS3025BL both run at 12V nominal.
+const MIN_VOLTAGE_TENTHS: u8 = 110;
 
 #[gen_stub_pyclass]
 #[pyclass]
 #[derive(Debug, Clone, Copy)]
-pub struct FullBodyPosition {
+pub struct DreamboTorsoPosition {
     #[pyo3(get)]
-    pub body_yaw: f64,
+    pub left_arm: [f64; 2],
     #[pyo3(get)]
-    pub stewart: [f64; 6],
+    pub right_arm: [f64; 2],
     #[pyo3(get)]
-    pub antennas: [f64; 2],
+    pub nose: [f64; 3],
     #[pyo3(get)]
     pub timestamp: f64, // seconds since UNIX epoch
 }
@@ -74,18 +79,16 @@ where
 
 #[gen_stub_pymethods]
 #[pymethods]
-impl FullBodyPosition {
+impl DreamboTorsoPosition {
     #[new]
-    pub fn new(body_yaw: f64, stewart: Vec<f64>, antennas: Vec<f64>) -> Self {
-        if stewart.len() != 6 || antennas.len() != 2 {
-            panic!("Stewart platform must have 6 positions and antennas must have 2 positions.");
+    pub fn new(left_arm: Vec<f64>, right_arm: Vec<f64>, nose: Vec<f64>) -> Self {
+        if left_arm.len() != 2 || right_arm.len() != 2 || nose.len() != 3 {
+            panic!("Each arm must have 2 positions and the nose must have 3 positions.");
         }
-        FullBodyPosition {
-            body_yaw,
-            stewart: [
-                stewart[0], stewart[1], stewart[2], stewart[3], stewart[4], stewart[5],
-            ],
-            antennas: [antennas[0], antennas[1]],
+        DreamboTorsoPosition {
+            left_arm: [left_arm[0], left_arm[1]],
+            right_arm: [right_arm[0], right_arm[1]],
+            nose: [nose[0], nose[1], nose[2]],
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::from_secs(0))
@@ -95,8 +98,8 @@ impl FullBodyPosition {
 
     fn __repr__(&self) -> pyo3::PyResult<String> {
         Ok(format!(
-            "FullBodyPosition(body_yaw={:.3}, stewart={:?}, antennas={:?}, timestamp={:.3})",
-            self.body_yaw, self.stewart, self.antennas, self.timestamp
+            "DreamboTorsoPosition(left_arm={:?}, right_arm={:?}, nose={:?}, timestamp={:.3})",
+            self.left_arm, self.right_arm, self.nose, self.timestamp
         ))
     }
 }
@@ -105,9 +108,8 @@ pub struct DreamboControlLoop {
     loop_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     stop_signal: Arc<Mutex<bool>>,
     tx: Sender<MotorCommand>,
-    last_position: Arc<Mutex<Result<FullBodyPosition, MotorError>>>,
+    last_position: Arc<Mutex<Result<DreamboTorsoPosition, MotorError>>>,
     last_torque: Arc<Mutex<Result<bool, MotorError>>>,
-    last_control_mode: Arc<Mutex<Result<u8, MotorError>>>,
     last_stats: Option<(Duration, Arc<Mutex<ControlLoopStats>>)>,
     motor_name_id: HashMap<String, u8>,
 }
@@ -115,16 +117,19 @@ pub struct DreamboControlLoop {
 #[derive(Debug, Clone)]
 pub enum MotorCommand {
     SetAllGoalPositions {
-        positions: FullBodyPosition,
+        positions: DreamboTorsoPosition,
     },
-    SetStewartPlatformPosition {
-        position: [f64; 6],
+    SetLeftArm {
+        position: [f64; 2],
     },
-    SetBodyRotation {
-        position: f64,
+    SetRightArm {
+        position: [f64; 2],
     },
-    SetAntennasPositions {
-        positions: [f64; 2],
+    SetArms {
+        position: [f64; 4],
+    },
+    SetNose {
+        position: [f64; 3],
     },
     EnableTorque(),
     EnableTorqueOnIds {
@@ -134,25 +139,10 @@ pub enum MotorCommand {
     DisableTorqueOnIds {
         ids: Vec<u8>,
     },
-    SetStewartPlatformGoalCurrent {
-        current: [i16; 6],
-    },
-    SetStewartPlatformOperatingMode {
-        mode: u8,
-    },
-    SetAntennasOperatingMode {
-        mode: u8,
-    },
-    SetBodyRotationOperatingMode {
-        mode: u8,
-    },
-    EnableStewartPlatform {
+    EnableArms {
         enable: bool,
     },
-    EnableBodyRotation {
-        enable: bool,
-    },
-    EnableAntennas {
+    EnableNose {
         enable: bool,
     },
     ReadRawBytes {
@@ -208,7 +198,7 @@ pub enum MotorError {
     MissingMotors(Vec<String>),
     CommunicationError(),
     NoPowerError(),
-    VoltageRampUpTimeoutError(u16, Duration),
+    VoltageRampUpTimeoutError(u8, Duration),
     PortNotFound(String),
     CouldNotOpenPort(String),
 }
@@ -249,8 +239,9 @@ impl std::fmt::Display for MotorError {
             MotorError::VoltageRampUpTimeoutError(voltage, duration) => {
                 write!(
                     f,
-                    "Voltage did not ramp up to 5V ({}V) within {:?}!",
-                    voltage, duration
+                    "Voltage did not ramp up to 12V (got {:.1}V) within {:?}!",
+                    *voltage as f64 / 10.0,
+                    duration
                 )
             }
         }
@@ -295,11 +286,11 @@ impl DreamboControlLoop {
             return Err(MotorError::PortNotFound(serialport));
         }
 
-        let mut c = DreamboServoController::new(serialport.as_str())
+        let mut c = DreamboMotorController::new(serialport.as_str())
             .map_err(|_| MotorError::CouldNotOpenPort(serialport.clone()))?;
 
         match c.check_missing_ids() {
-            Ok(missing_ids) if missing_ids.len() == 9 => {
+            Ok(missing_ids) if missing_ids.len() == 7 => {
                 return Err(MotorError::NoPowerError());
             }
             Ok(missing_ids) if !missing_ids.is_empty() => {
@@ -324,35 +315,35 @@ impl DreamboControlLoop {
             Err(_) => return Err(MotorError::CommunicationError()),
         }
 
-        // Wait until voltage is stable at 5V
-        info!("Waiting for voltage to be stable at 5V...");
+        // Wait until voltage is stable at the 12V rail
+        info!("Waiting for voltage to be stable at 12V...");
         let mut current_voltage = with_retry(|| c.read_all_voltages(), read_allowed_retries)
             .map_err(|_| MotorError::CommunicationError())?;
         let start_time = SystemTime::now();
         while current_voltage
             .iter()
-            .any(|&v| v < 45 && start_time.elapsed().unwrap() < voltage_rampup_timeout)
+            .any(|&v| v < MIN_VOLTAGE_TENTHS && start_time.elapsed().unwrap() < voltage_rampup_timeout)
         {
             std::thread::sleep(Duration::from_millis(100));
             current_voltage = with_retry(|| c.read_all_voltages(), read_allowed_retries)
                 .map_err(|_| MotorError::CommunicationError())?;
         }
-        if current_voltage.iter().any(|&v| v < 45) {
+        if current_voltage.iter().any(|&v| v < MIN_VOLTAGE_TENTHS) {
             return Err(MotorError::VoltageRampUpTimeoutError(
                 current_voltage.iter().cloned().min().unwrap_or(0),
                 voltage_rampup_timeout,
             ));
         }
         info!(
-            "Voltage is stable at ~5V: {:?} (took {:?})",
+            "Voltage is stable at ~12V: {:?} (took {:?})",
             current_voltage,
             start_time.elapsed().unwrap()
         );
 
         let motor_name_id = c.get_motor_name_id();
 
-        // Reboot all motors on error status
-        c.reboot(true, Duration::from_secs(1))
+        // Reboot all motors
+        c.reboot(Duration::from_secs(1))
             .map_err(|_| MotorError::CommunicationError())?;
 
         // Init last position by trying to read current positions
@@ -361,19 +352,12 @@ impl DreamboControlLoop {
         let last_position = read_pos(&mut c, read_allowed_retries)?;
         let last_torque = with_retry(|| c.is_torque_enabled(), read_allowed_retries)
             .map_err(|_| MotorError::CommunicationError())?;
-        let last_control_mode = with_retry(
-            || c.read_stewart_platform_operating_mode(),
-            read_allowed_retries,
-        )
-        .map_err(|_| MotorError::CommunicationError())?[0];
 
         let last_position = Arc::new(Mutex::new(Ok(last_position)));
         let last_position_clone = last_position.clone();
 
         let last_torque = Arc::new(Mutex::new(Ok(last_torque)));
         let last_torque_clone = last_torque.clone();
-        let last_control_mode = Arc::new(Mutex::new(Ok(last_control_mode)));
-        let last_control_mode_clone = last_control_mode.clone();
 
         let loop_handle = std::thread::spawn(move || {
             run(
@@ -382,7 +366,6 @@ impl DreamboControlLoop {
                 rx,
                 last_position_clone,
                 last_torque_clone,
-                last_control_mode_clone,
                 last_stats_clone,
                 read_position_loop_period,
                 read_allowed_retries,
@@ -395,7 +378,6 @@ impl DreamboControlLoop {
             tx,
             last_position,
             last_torque,
-            last_control_mode,
             last_stats,
             motor_name_id,
         })
@@ -436,7 +418,7 @@ impl DreamboControlLoop {
         self.tx.blocking_send(command)
     }
 
-    pub fn get_last_position(&self) -> Result<FullBodyPosition, MotorError> {
+    pub fn get_last_position(&self) -> Result<DreamboTorsoPosition, MotorError> {
         let guard = match self.last_position.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -460,21 +442,6 @@ impl DreamboControlLoop {
         };
         match &*guard {
             Ok(enabled) => Ok(*enabled),
-            Err(e) => Err(e.clone()),
-        }
-    }
-
-    pub fn get_control_mode(&self) -> Result<u8, MotorError> {
-        let guard = match self.last_control_mode.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                log::error!("last_control_mode mutex was poisoned");
-                poisoned.into_inner()
-            }
-        };
-
-        match &*guard {
-            Ok(mode) => Ok(*mode),
             Err(e) => Err(e.clone()),
         }
     }
@@ -516,18 +483,18 @@ impl DreamboControlLoop {
         Ok(())
     }
 
+    /// PID coefficient registers on SM40BL / STS3025BL: P=21, D=22, I=23 (each u8).
     pub fn async_read_pid_gains(&self, id: u8) -> Result<(u16, u16, u16), MotorError> {
-        // https://emanual.robotis.com/docs/en/dxl/x/xl330-m288/#velocity-i-gain
-        const DIP_GAIN_ADDR: u8 = 80;
+        const P_GAIN_ADDR: u8 = 21;
 
-        self.async_read_raw_bytes(id, DIP_GAIN_ADDR, 3 * 2)
+        self.async_read_raw_bytes(id, P_GAIN_ADDR, 3)
             .and_then(|data| {
-                if data.len() != 6 {
+                if data.len() != 3 {
                     return Err(MotorError::CommunicationError());
                 }
-                let d_gain = u16::from_le_bytes([data[0], data[1]]);
-                let i_gain = u16::from_le_bytes([data[2], data[3]]);
-                let p_gain = u16::from_le_bytes([data[4], data[5]]);
+                let p_gain = data[0] as u16;
+                let d_gain = data[1] as u16;
+                let i_gain = data[2] as u16;
                 Ok((p_gain, i_gain, d_gain))
             })
     }
@@ -539,15 +506,11 @@ impl DreamboControlLoop {
         i_gain: u16,
         d_gain: u16,
     ) -> Result<(), MotorError> {
-        // https://emanual.robotis.com/docs/en/dxl/x/xl330-m288/#velocity-i-gain
-        const DIP_GAIN_ADDR: u8 = 80;
+        const P_GAIN_ADDR: u8 = 21;
 
-        let mut data = Vec::with_capacity(6);
-        data.extend_from_slice(&d_gain.to_le_bytes());
-        data.extend_from_slice(&i_gain.to_le_bytes());
-        data.extend_from_slice(&p_gain.to_le_bytes());
+        let data = vec![p_gain as u8, d_gain as u8, i_gain as u8];
 
-        self.async_write_raw_bytes(id, DIP_GAIN_ADDR, data)
+        self.async_write_raw_bytes(id, P_GAIN_ADDR, data)
     }
 }
 
@@ -558,12 +521,11 @@ impl Drop for DreamboControlLoop {
 }
 
 fn run(
-    mut c: DreamboServoController,
+    mut c: DreamboMotorController,
     stop_signal: Arc<Mutex<bool>>,
     mut rx: mpsc::Receiver<MotorCommand>,
-    last_position: Arc<Mutex<Result<FullBodyPosition, MotorError>>>,
+    last_position: Arc<Mutex<Result<DreamboTorsoPosition, MotorError>>>,
     last_torque: Arc<Mutex<Result<bool, MotorError>>>,
-    last_control_mode: Arc<Mutex<Result<u8, MotorError>>>,
     last_stats: Option<(Duration, Arc<Mutex<ControlLoopStats>>)>,
     read_position_loop_period: Duration,
     read_allowed_retries: u64,
@@ -583,7 +545,7 @@ fn run(
                 maybe_command = rx.recv() => {
                     if let Some(command) = maybe_command {
                         let write_tick = std::time::Instant::now();
-                        if handle_commands(&mut c, last_torque.clone(), last_control_mode.clone(), command, read_allowed_retries).is_ok() {
+                        if handle_commands(&mut c, last_torque.clone(), command, read_allowed_retries).is_ok() {
                             if last_stats.is_some() {
                                 let elapsed = write_tick.elapsed().as_secs_f64();
                                 write_dt.push(elapsed);
@@ -600,17 +562,8 @@ fn run(
 
                     match read_pos(&mut c, read_allowed_retries) {
                         Ok(positions) => {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-                            let last = FullBodyPosition {
-                                body_yaw: positions.body_yaw,
-                                stewart: positions.stewart,
-                                antennas: positions.antennas,
-                                timestamp: now.as_secs_f64(),
-                            };
                             if let Ok(mut pos) = last_position.lock() {
-                                *pos = Ok(last);
+                                *pos = Ok(positions);
                             }
                         },
                         Err(e) => {
@@ -643,7 +596,7 @@ fn run(
                         break;
                     }
                     if let Some(command) = rx.recv().await {
-                        let _ = handle_commands(&mut c, last_torque.clone(), last_control_mode.clone(), command, read_allowed_retries);
+                        let _ = handle_commands(&mut c, last_torque.clone(), command, read_allowed_retries);
                     }
                 }
                 break;
@@ -653,9 +606,8 @@ fn run(
 }
 
 fn handle_commands(
-    controller: &mut DreamboServoController,
+    controller: &mut DreamboMotorController,
     last_torque: Arc<Mutex<Result<bool, MotorError>>>,
-    last_control_mode: Arc<Mutex<Result<u8, MotorError>>>,
     command: MotorCommand,
     read_allowed_retries: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -664,24 +616,19 @@ fn handle_commands(
     match command {
         SetAllGoalPositions { positions } => controller
             .set_all_goal_positions([
-                positions.body_yaw,
-                positions.stewart[0],
-                positions.stewart[1],
-                positions.stewart[2],
-                positions.stewart[3],
-                positions.stewart[4],
-                positions.stewart[5],
-                positions.antennas[0],
-                positions.antennas[1],
+                positions.left_arm[0],
+                positions.left_arm[1],
+                positions.right_arm[0],
+                positions.right_arm[1],
+                positions.nose[0],
+                positions.nose[1],
+                positions.nose[2],
             ])
             .map(|_| ()),
-        SetStewartPlatformPosition { position } => controller
-            .set_stewart_platform_position(position)
-            .map(|_| ()),
-        SetBodyRotation { position } => controller.set_body_rotation(position).map(|_| ()),
-        SetAntennasPositions { positions } => {
-            controller.set_antennas_positions(positions).map(|_| ())
-        }
+        SetLeftArm { position } => controller.set_left_arm_position(position).map(|_| ()),
+        SetRightArm { position } => controller.set_right_arm_position(position).map(|_| ()),
+        SetArms { position } => controller.set_arms_position(position).map(|_| ()),
+        SetNose { position } => controller.set_nose_position(position).map(|_| ()),
         EnableTorque() => {
             let res = controller.enable_torque();
             if res.is_ok()
@@ -718,29 +665,8 @@ fn handle_commands(
             }
             res.map(|_| ())
         }
-        SetStewartPlatformGoalCurrent { current } => controller
-            .set_stewart_platform_goal_current(current)
-            .map(|_| ()),
-        SetStewartPlatformOperatingMode { mode } => {
-            let res = controller.set_stewart_platform_operating_mode(mode);
-            if res.is_ok()
-                && let Ok(mut control_mode) = last_control_mode.lock()
-            {
-                *control_mode = Ok(mode);
-            }
-            res.map(|_| ())
-        }
-        SetAntennasOperatingMode { mode } => {
-            controller.set_antennas_operating_mode(mode).map(|_| ())
-        }
-        SetBodyRotationOperatingMode { mode } => controller
-            .set_body_rotation_operating_mode(mode)
-            .map(|_| ()),
-        EnableStewartPlatform { enable } => {
-            controller.enable_stewart_platform(enable).map(|_| ())
-        }
-        EnableBodyRotation { enable } => controller.enable_body_rotation(enable).map(|_| ()),
-        EnableAntennas { enable } => controller.enable_antennas(enable).map(|_| ()),
+        EnableArms { enable } => controller.enable_arms(enable).map(|_| ()),
+        EnableNose { enable } => controller.enable_nose(enable).map(|_| ()),
         ReadRawBytes { id, addr, length, tx } => {
             let data = with_retry(
                 || controller.read_raw_bytes(id, addr, length),
@@ -761,25 +687,18 @@ fn handle_commands(
 }
 
 pub fn read_pos(
-    c: &mut DreamboServoController,
+    c: &mut DreamboMotorController,
     read_allowed_retries: u64,
-) -> Result<FullBodyPosition, MotorError> {
+) -> Result<DreamboTorsoPosition, MotorError> {
     with_retry(|| c.read_all_positions(), read_allowed_retries)
         .map(|positions| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-            FullBodyPosition {
-                body_yaw: positions[0],
-                stewart: [
-                    positions[1],
-                    positions[2],
-                    positions[3],
-                    positions[4],
-                    positions[5],
-                    positions[6],
-                ],
-                antennas: [positions[7], positions[8]],
+            DreamboTorsoPosition {
+                left_arm: [positions[0], positions[1]],
+                right_arm: [positions[2], positions[3]],
+                nose: [positions[4], positions[5], positions[6]],
                 timestamp: now.as_secs_f64(),
             }
         })

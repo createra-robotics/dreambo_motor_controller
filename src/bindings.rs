@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::mpsc::channel, time::Duration};
 
 use crate::control_loop::{
-    ControlLoopStats, FullBodyPosition, MotorCommand, DreamboControlLoop,
+    ControlLoopStats, DreamboControlLoop, DreamboTorsoPosition, MotorCommand,
 };
 
 use pyo3::{prelude::*, types::PyBytes};
@@ -10,18 +10,17 @@ use pyo3_stub_gen::{
     derive::{gen_stub_pyclass, gen_stub_pymethods},
 };
 
-use crate::DreamboServoController as Controller;
+use crate::DreamboMotorController as Controller;
 
 #[gen_stub_pyclass]
 #[pyclass(frozen)]
-
-struct DreamboServoController {
+struct DreamboMotorController {
     inner: std::sync::Mutex<Controller>,
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
-impl DreamboServoController {
+impl DreamboMotorController {
     /// Create a new motor controller for the given serial port.
     ///
     /// # Arguments
@@ -30,7 +29,7 @@ impl DreamboServoController {
     fn new(serialport: String) -> PyResult<Self> {
         let inner = Controller::new(&serialport)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(DreamboServoController {
+        Ok(DreamboMotorController {
             inner: std::sync::Mutex::new(inner),
         })
     }
@@ -93,8 +92,9 @@ impl DreamboServoController {
         Ok(())
     }
 
-    /// Read all motor positions as a 9-element array.
-    fn read_all_positions(&self) -> PyResult<[f64; 9]> {
+    /// Read all motor positions as a 7-element array.
+    /// Order: [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
+    fn read_all_positions(&self) -> PyResult<[f64; 7]> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
         })?;
@@ -104,33 +104,12 @@ impl DreamboServoController {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Read the current for the Stewart platform motors.
-    fn read_stewart_platform_current(&self) -> PyResult<[i16; 6]> {
-        let mut inner = self.inner.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
-        })?;
-
-        inner
-            .read_stewart_platform_current()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Read the operating mode for the Stewart platform motors.
-    fn read_stewart_platform_operating_mode(&self) -> PyResult<[u8; 6]> {
-        let mut inner = self.inner.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
-        })?;
-
-        inner
-            .read_stewart_platform_operating_mode()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Set goal positions for all motors (9 values).
+    /// Set goal positions for all motors (7 values).
     ///
     /// # Arguments
-    /// * `positions` - Array of 9 goal positions (body_yaw, stewart, antennas).
-    fn set_all_goal_positions(&self, positions: [f64; 9]) -> PyResult<()> {
+    /// * `positions` - Array of 7 goal positions
+    ///   (left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2).
+    fn set_all_goal_positions(&self, positions: [f64; 7]) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
         })?;
@@ -141,152 +120,74 @@ impl DreamboServoController {
         Ok(())
     }
 
-    /// Set goal positions for the antennas (2 values).
-    ///
-    /// # Arguments
-    /// * `positions` - Array of 2 goal positions for antennas.
-    fn set_antennas_positions(&self, positions: [f64; 2]) -> PyResult<()> {
+    /// Set goal positions for the left arm (2 values: pitch, yaw).
+    fn set_left_arm_position(&self, position: [f64; 2]) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
         })?;
 
         inner
-            .set_antennas_positions(positions)
+            .set_left_arm_position(position)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(())
     }
 
-    /// Set goal positions for the Stewart platform (6 values).
-    ///
-    /// # Arguments
-    /// * `position` - Array of 6 goal positions for Stewart platform.
-    fn set_stewart_platform_position(&self, position: [f64; 6]) -> PyResult<()> {
+    /// Set goal positions for the right arm (2 values: pitch, yaw).
+    fn set_right_arm_position(&self, position: [f64; 2]) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
         })?;
 
         inner
-            .set_stewart_platform_position(position)
+            .set_right_arm_position(position)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(())
     }
 
-    /// Set goal position for the body rotation motor.
-    ///
-    /// # Arguments
-    /// * `position` - Goal position for body rotation motor.
-    fn set_body_rotation(&self, position: f64) -> PyResult<()> {
+    /// Set goal positions for both arms (4 values: left pitch, left yaw, right pitch, right yaw).
+    fn set_arms_position(&self, position: [f64; 4]) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
         })?;
 
         inner
-            .set_body_rotation(position)
+            .set_arms_position(position)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(())
     }
 
-    /// Set goal current for the Stewart platform motors.
-    ///
-    /// # Arguments
-    /// * `current` - Array of 6 goal currents for Stewart platform motors.
-    fn set_stewart_platform_goal_current(&self, current: [i16; 6]) -> PyResult<()> {
+    /// Set goal positions for the nose (3 values).
+    fn set_nose_position(&self, position: [f64; 3]) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
         })?;
 
         inner
-            .set_stewart_platform_goal_current(current)
+            .set_nose_position(position)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(())
     }
 
-    /// Set operating mode for all Stewart platform motors.
-    ///
-    /// # Arguments
-    /// * `mode` - Operating mode value for Stewart platform motors.
-    fn set_stewart_platform_operating_mode(&self, mode: u8) -> PyResult<()> {
+    /// Enable or disable the arm motors.
+    fn enable_arms(&self, enable: bool) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
         })?;
 
         inner
-            .set_stewart_platform_operating_mode(mode)
+            .enable_arms(enable)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(())
     }
 
-    /// Set operating mode for both antennas.
-    ///
-    /// # Arguments
-    /// * `mode` - Operating mode value for antennas.
-    fn set_antennas_operating_mode(&self, mode: u8) -> PyResult<()> {
+    /// Enable or disable the nose motors.
+    fn enable_nose(&self, enable: bool) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
         })?;
 
         inner
-            .set_antennas_operating_mode(mode)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Set operating mode for the body rotation motor.
-    ///
-    /// # Arguments
-    /// * `mode` - Operating mode value for body rotation motor.
-    fn set_body_rotation_operating_mode(&self, mode: u8) -> PyResult<()> {
-        let mut inner = self.inner.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
-        })?;
-
-        inner
-            .set_body_rotation_operating_mode(mode)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Enable or disable the body rotation motor.
-    ///
-    /// # Arguments
-    /// * `enable` - Set to true to enable, false to disable.
-    fn enable_body_rotation(&self, enable: bool) -> PyResult<()> {
-        let mut inner = self.inner.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
-        })?;
-
-        inner
-            .enable_body_rotation(enable)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Enable or disable the antennas.
-    ///
-    /// # Arguments
-    /// * `enable` - Set to true to enable, false to disable.
-    fn enable_antennas(&self, enable: bool) -> PyResult<()> {
-        let mut inner = self.inner.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
-        })?;
-
-        inner
-            .enable_antennas(enable)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Enable or disable the Stewart platform motors.
-    ///
-    /// # Arguments
-    /// * `enable` - Set to true to enable, false to disable.
-    fn enable_stewart_platform(&self, enable: bool) -> PyResult<()> {
-        let mut inner = self.inner.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
-        })?;
-
-        inner
-            .enable_stewart_platform(enable)
+            .enable_nose(enable)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(())
     }
@@ -320,10 +221,10 @@ impl DreamboPyControlLoop {
     ///
     /// # Arguments
     /// * `serialport` - Path to (Unix) or COM ID (Windows) of the serial port device.
-    /// * `update_loop_period` - Period between control loop updates.
+    /// * `read_position_loop_period` - Period between control loop updates.
     /// * `allowed_retries` - Number of allowed retries for reading positions.
-    /// * `init_timeout` - Timeout for initial position read.
     /// * `stats_pub_period` - Optional period for publishing stats.
+    /// * `voltage_rampup_timeout` - Maximum time to wait for the 12V rail to stabilize.
     #[new]
     #[pyo3(signature = (
         serialport,
@@ -364,49 +265,44 @@ impl DreamboPyControlLoop {
     }
 
     /// Get the last successfully read motor positions.
-    fn get_last_position(&self) -> PyResult<FullBodyPosition> {
+    fn get_last_position(&self) -> PyResult<DreamboTorsoPosition> {
         self.inner
             .get_last_position()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Set goal positions for all motors (9 values).
-    ///
-    /// # Arguments
-    /// * `positions` - Array of 9 goal positions (body_yaw, stewart, antennas).
-    fn set_all_goal_positions(&self, positions: FullBodyPosition) -> PyResult<()> {
+    /// Set goal positions for all motors.
+    fn set_all_goal_positions(&self, positions: DreamboTorsoPosition) -> PyResult<()> {
         self.inner
             .push_command(MotorCommand::SetAllGoalPositions { positions })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Set goal positions for the Stewart platform (6 values).
-    ///
-    /// # Arguments
-    /// * `position` - Array of 6 goal positions for Stewart platform.
-    fn set_stewart_platform_position(&self, position: [f64; 6]) -> PyResult<()> {
+    /// Set goal positions for the left arm (2 values: pitch, yaw).
+    fn set_left_arm_position(&self, position: [f64; 2]) -> PyResult<()> {
         self.inner
-            .push_command(MotorCommand::SetStewartPlatformPosition { position })
+            .push_command(MotorCommand::SetLeftArm { position })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Set goal position for the body rotation motor.
-    ///
-    /// # Arguments
-    /// * `position` - Goal position for body rotation motor.
-    fn set_body_rotation(&self, position: f64) -> PyResult<()> {
+    /// Set goal positions for the right arm (2 values: pitch, yaw).
+    fn set_right_arm_position(&self, position: [f64; 2]) -> PyResult<()> {
         self.inner
-            .push_command(MotorCommand::SetBodyRotation { position })
+            .push_command(MotorCommand::SetRightArm { position })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Set goal positions for the antennas (2 values).
-    ///
-    /// # Arguments
-    /// * `positions` - Array of 2 goal positions for antennas.
-    fn set_antennas_positions(&self, positions: [f64; 2]) -> PyResult<()> {
+    /// Set goal positions for both arms (4 values).
+    fn set_arms_position(&self, position: [f64; 4]) -> PyResult<()> {
         self.inner
-            .push_command(MotorCommand::SetAntennasPositions { positions })
+            .push_command(MotorCommand::SetArms { position })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Set goal positions for the nose (3 values).
+    fn set_nose_position(&self, position: [f64; 3]) -> PyResult<()> {
+        self.inner
+            .push_command(MotorCommand::SetNose { position })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -445,80 +341,17 @@ impl DreamboPyControlLoop {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Set goal current for the Stewart platform motors.
-    ///
-    /// # Arguments
-    /// * `current` - Array of 6 goal currents for Stewart platform motors.
-    fn set_stewart_platform_goal_current(&self, current: [i16; 6]) -> PyResult<()> {
+    /// Enable or disable the arm motors.
+    fn enable_arms(&self, enable: bool) -> PyResult<()> {
         self.inner
-            .push_command(MotorCommand::SetStewartPlatformGoalCurrent { current })
+            .push_command(MotorCommand::EnableArms { enable })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Check stewart platform operating mode
-    fn get_stewart_platform_operating_mode(&self) -> PyResult<u8> {
+    /// Enable or disable the nose motors.
+    fn enable_nose(&self, enable: bool) -> PyResult<()> {
         self.inner
-            .get_control_mode()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Set operating mode for all Stewart platform motors.
-    ///
-    /// # Arguments
-    /// * `mode` - Operating mode value for Stewart platform motors.
-    fn set_stewart_platform_operating_mode(&self, mode: u8) -> PyResult<()> {
-        self.inner
-            .push_command(MotorCommand::SetStewartPlatformOperatingMode { mode })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Set operating mode for both antennas.
-    ///
-    /// # Arguments
-    /// * `mode` - Operating mode value for antennas.
-    fn set_antennas_operating_mode(&self, mode: u8) -> PyResult<()> {
-        self.inner
-            .push_command(MotorCommand::SetAntennasOperatingMode { mode })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Set operating mode for the body rotation motor.
-    ///
-    /// # Arguments
-    /// * `mode` - Operating mode value for body rotation motor.
-    fn set_body_rotation_operating_mode(&self, mode: u8) -> PyResult<()> {
-        self.inner
-            .push_command(MotorCommand::SetBodyRotationOperatingMode { mode })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Enable or disable the Stewart platform motors.
-    ///
-    /// # Arguments
-    /// * `enable` - Set to true to enable, false to disable.
-    fn enable_stewart_platform(&self, enable: bool) -> PyResult<()> {
-        self.inner
-            .push_command(MotorCommand::EnableStewartPlatform { enable })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Enable or disable the body rotation motor.
-    ///
-    /// # Arguments
-    /// * `enable` - Set to true to enable, false to disable.
-    fn enable_body_rotation(&self, enable: bool) -> PyResult<()> {
-        self.inner
-            .push_command(MotorCommand::EnableBodyRotation { enable })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Enable or disable the antennas.
-    ///
-    /// # Arguments
-    /// * `enable` - Set to true to enable, false to disable.
-    fn enable_antennas(&self, enable: bool) -> PyResult<()> {
-        self.inner
-            .push_command(MotorCommand::EnableAntennas { enable })
+            .push_command(MotorCommand::EnableNose { enable })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -530,60 +363,45 @@ impl DreamboPyControlLoop {
     }
 
     /// Perform an asynchronous raw read of motor bytes.
-    /// # Arguments
-    /// * `id` - Motor ID to read from.
-    /// * `addr` - Address to read from.
-    /// * `length` - Number of bytes to read.
     fn async_read_raw_bytes(&self, id: u8, addr: u8, length: u8) -> PyResult<Vec<u8>> {
         self.inner
             .async_read_raw_bytes(id, addr, length)
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "Failed to read raw bytes: {}",
-                    e.to_string()
+                    e
                 ))
             })
     }
 
     /// Perform an asynchronous raw write of motor bytes.
-    /// # Arguments
-    /// * `id` - Motor ID to write to.
-    /// * `addr` - Address to write to.
-    /// * `data` - Data bytes to write.
     fn async_write_raw_bytes(&self, id: u8, addr: u8, data: Vec<u8>) -> PyResult<()> {
         self.inner
             .async_write_raw_bytes(id, addr, data)
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "Failed to write raw bytes: {}",
-                    e.to_string()
+                    e
                 ))
             })
     }
 
-    /// Read pid gains for a given motor id.
-    /// # Arguments
-    /// * `id` - Motor ID to read from.
+    /// Read PID gains for a given motor id. Returns (P, I, D).
     fn async_read_pid_gains(&self, id: u8) -> PyResult<(u16, u16, u16)> {
         self.inner.async_read_pid_gains(id).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Failed to read pid gains: {}",
-                e.to_string()
+                e
             ))
         })
     }
 
-    /// Write pid gains for a given motor id.
-    /// # Arguments
-    /// * `id` - Motor ID to write to.
-    /// * `p` - Proportional gain.
-    /// * `i` - Integral gain.
-    /// * `d` - Derivative gain.
+    /// Write PID gains for a given motor id.
     fn async_write_pid_gains(&self, id: u8, p: u16, i: u16, d: u16) -> PyResult<()> {
         self.inner.async_write_pid_gains(id, p, i, d).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Failed to write pid gains: {}",
-                e.to_string()
+                e
             ))
         })
     }
@@ -608,12 +426,12 @@ impl DreamboPyControlLoop {
 }
 
 #[pyo3::pymodule]
-fn dreambo_servo_controller(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn dreambo_motor_controller(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();
 
-    m.add_class::<DreamboServoController>()?;
+    m.add_class::<DreamboMotorController>()?;
     m.add_class::<DreamboPyControlLoop>()?;
-    m.add_class::<FullBodyPosition>()?;
+    m.add_class::<DreamboTorsoPosition>()?;
     m.add_class::<ControlLoopStats>()?;
 
     Ok(())
