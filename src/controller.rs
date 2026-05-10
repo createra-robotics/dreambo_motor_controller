@@ -16,17 +16,15 @@ const ARM_IDS: [u8; 4] = [1, 2, 3, 4];
 const NOSE_IDS: [u8; 3] = [5, 6, 7];
 
 impl DreamboMotorController {
-    pub fn new(serialport: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(port: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let protocol = servocom::FeetechProtocolHandler::new();
-        let port = serialport::new(serialport, SERVO_BAUD)
+        let port = serialport::new(port, SERVO_BAUD)
             .timeout(Duration::from_millis(10))
             .open()?;
-
         let all_ids = [
             ARM_IDS[0], ARM_IDS[1], ARM_IDS[2], ARM_IDS[3],
             NOSE_IDS[0], NOSE_IDS[1], NOSE_IDS[2],
         ];
-
         Ok(Self {
             protocol,
             port,
@@ -40,9 +38,9 @@ impl DreamboMotorController {
         motor_id_name.insert("left_arm_yaw".to_string(), LEFT_ARM_IDS[1]);
         motor_id_name.insert("right_arm_pitch".to_string(), RIGHT_ARM_IDS[0]);
         motor_id_name.insert("right_arm_yaw".to_string(), RIGHT_ARM_IDS[1]);
-        motor_id_name.insert("nose_0".to_string(), NOSE_IDS[0]);
-        motor_id_name.insert("nose_1".to_string(), NOSE_IDS[1]);
-        motor_id_name.insert("nose_2".to_string(), NOSE_IDS[2]);
+        motor_id_name.insert("nose_top".to_string(), NOSE_IDS[0]);
+        motor_id_name.insert("nose_left".to_string(), NOSE_IDS[1]);
+        motor_id_name.insert("nose_right".to_string(), NOSE_IDS[2]);
         motor_id_name
     }
 
@@ -113,7 +111,7 @@ impl DreamboMotorController {
 
     /// Read the current input voltage of all servos.
     /// Returns an array of 7 voltages (in 0.1V units) in the following order:
-    /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
+    /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_top, nose_left, nose_right]
     pub fn read_all_voltages(&mut self) -> Result<[u8; 7], Box<dyn std::error::Error>> {
         let arm_volts = sm40bl::sync_read_present_voltage(
             &self.protocol,
@@ -134,7 +132,7 @@ impl DreamboMotorController {
 
     /// Read the current position of all servos.
     /// Returns an array of 7 positions in the following order:
-    /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
+    /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_top, nose_left, nose_right]
     pub fn read_all_positions(&mut self) -> Result<[f64; 7], Box<dyn std::error::Error>> {
         let arm_pos = sm40bl::sync_read_present_position(
             &self.protocol,
@@ -155,7 +153,7 @@ impl DreamboMotorController {
 
     /// Set the goal position of all servos.
     /// The positions array must be in the following order:
-    /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
+    /// [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_top, nose_left, nose_right]
     pub fn set_all_goal_positions(
         &mut self,
         positions: [f64; 7],

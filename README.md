@@ -14,9 +14,9 @@ Install [Dreambo Servo Wizard](https://github.com/createra-robotics/dreambo_serv
   * Right Arm Yaw Servo ID: 4
 
 - Logarithmic spiral-shaped robotic nose: all servos are STS3025BL
-  * Nose[0] Servo ID: 5
-  * Nose[1] Servo ID: 6
-  * Nose[2] Servo ID: 7
+  * Nose Top Servo ID: 5
+  * Nose Left Servo ID: 6
+  * Nose Right Servo ID: 7
 
 - Coming soon:
   - Left Eyeball Yaw Servo ID: 8
@@ -60,7 +60,7 @@ c.enable_torque()
 
 # 7 positions: [left_arm_pitch, left_arm_yaw,
 #               right_arm_pitch, right_arm_yaw,
-#               nose_0, nose_1, nose_2]
+#               nose_top, nose_left, nose_right]
 c.set_all_goal_positions([0.0] * 7)
 
 # Or drive groups individually

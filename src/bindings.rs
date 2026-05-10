@@ -93,7 +93,7 @@ impl DreamboMotorController {
     }
 
     /// Read all motor positions as a 7-element array.
-    /// Order: [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2]
+    /// Order: [left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_top, nose_left, nose_right]
     fn read_all_positions(&self) -> PyResult<[f64; 7]> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
@@ -108,7 +108,7 @@ impl DreamboMotorController {
     ///
     /// # Arguments
     /// * `positions` - Array of 7 goal positions
-    ///   (left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_0, nose_1, nose_2).
+    ///   (left_arm_pitch, left_arm_yaw, right_arm_pitch, right_arm_yaw, nose_top, nose_left, nose_right).
     fn set_all_goal_positions(&self, positions: [f64; 7]) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
