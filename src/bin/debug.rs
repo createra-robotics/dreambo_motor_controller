@@ -4,7 +4,7 @@ use dreambo_motor_controller::DreamboMotorController;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let serial_port = "/dev/ttyACM0"; // Adjust this to your serial port
     let serial_port = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79034031-if00";
-    let mut c = DreamboMotorController::new(serial_port)?;
+    let mut c = DreamboMotorController::new(Some(serial_port), "can0")?;
 
     // [left_pitch, left_yaw, right_pitch, right_yaw, nose_top, nose_left, nose_right]
     let lower = [-0.5, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0];

@@ -1,5 +1,5 @@
 mod controller;
-pub use controller::{DreamboMotorController, SERVO_BAUD};
+pub use controller::{DreamboMotorController, DEFAULT_CAN_BUS, SERVO_BAUD};
 
 pub mod bindings;
 

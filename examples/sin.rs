@@ -24,7 +24,7 @@ use dreambo_motor_controller::DreamboMotorController;
 
 fn main() {
     let serialport = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79034031-if00";
-    let mut c = DreamboMotorController::new(serialport).unwrap();
+    let mut c = DreamboMotorController::new(Some(serialport), "can0").unwrap();
 
     c.enable_torque().unwrap();
 

@@ -21,13 +21,17 @@ struct DreamboMotorController {
 #[gen_stub_pymethods]
 #[pymethods]
 impl DreamboMotorController {
-    /// Create a new motor controller for the given serial port.
+    /// Create a new motor controller for the given serial port and CAN bus.
     ///
     /// # Arguments
-    /// * `serialport` - Path to (Unix) or COM ID (Windows) of the serial port device.
+    /// * `serialport` - Path to (Unix) or COM ID (Windows) of the serial port.
+    ///   Pass `None` to build a neck-only (CAN) controller; arm/nose methods
+    ///   will then raise an exception.
+    /// * `can_bus` - SocketCAN interface name for the neck Damiao motors (default `"can0"`).
     #[new]
-    fn new(serialport: String) -> PyResult<Self> {
-        let inner = Controller::new(&serialport)
+    #[pyo3(signature = (serialport = None, can_bus = String::from("can0")))]
+    fn new(serialport: Option<String>, can_bus: String) -> PyResult<Self> {
+        let inner = Controller::new(serialport.as_deref(), &can_bus)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(DreamboMotorController {
             inner: std::sync::Mutex::new(inner),
@@ -168,6 +172,96 @@ impl DreamboMotorController {
         Ok(())
     }
 
+    /// Set goal positions for the neck (3 values: yaw, pitch, roll). Returns
+    /// the observed positions reported by the motor replies.
+    fn set_neck_position(&self, position: [f64; 3]) -> PyResult<[f64; 3]> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .set_neck_position(position)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn set_neck_yaw_position(&self, position: f64) -> PyResult<f64> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .set_neck_yaw_position(position)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn set_neck_pitch_position(&self, position: f64) -> PyResult<f64> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .set_neck_pitch_position(position)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn set_neck_roll_position(&self, position: f64) -> PyResult<f64> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .set_neck_roll_position(position)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Hard safety bounds (lower, upper) in rad for each neck joint.
+    /// Order: [yaw, pitch, roll]. Every neck setter clamps to these bounds
+    /// before commanding the motor.
+    fn neck_position_limits(&self) -> PyResult<[(f64, f64); 3]> {
+        let inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        Ok(inner.neck_position_limits())
+    }
+
+    /// Read the current neck positions (yaw, pitch, roll) via a Damiao
+    /// feedback request.
+    fn read_neck_positions(&self) -> PyResult<[f64; 3]> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .read_neck_positions()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Override the MIT impedance gains (kp, kd) for a single neck joint.
+    /// `index`: 0=yaw, 1=pitch, 2=roll.
+    fn set_neck_gains(&self, index: usize, kp: f32, kd: f32) -> PyResult<()> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .set_neck_gains(index, kp, kd)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Enable or disable the neck motors. On enable, also forces each motor
+    /// into MIT control mode.
+    fn enable_neck(&self, enable: bool) -> PyResult<()> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .enable_neck(enable)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Last commanded torque-enable state for the neck (in-memory; the
+    /// Damiao firmware does not expose a readable enable register).
+    fn is_neck_torque_enabled(&self) -> PyResult<bool> {
+        let inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        Ok(inner.is_neck_torque_enabled())
+    }
+
     /// Enable or disable the arm motors.
     fn enable_arms(&self, enable: bool) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
@@ -220,8 +314,11 @@ impl DreamboPyControlLoop {
     /// Create a new control loop for the motor controller.
     ///
     /// # Arguments
-    /// * `serialport` - Path to (Unix) or COM ID (Windows) of the serial port device.
+    /// * `serialport` - Path to (Unix) or COM ID (Windows) of the serial port.
+    ///   Pass `None` to build a neck-only (CAN) loop — arm/nose commands then
+    ///   raise on use.
     /// * `read_position_loop_period` - Period between control loop updates.
+    /// * `can_bus` - SocketCAN interface name for the neck Damiao motors (default `"can0"`).
     /// * `allowed_retries` - Number of allowed retries for reading positions.
     /// * `stats_pub_period` - Optional period for publishing stats.
     /// * `voltage_rampup_timeout` - Maximum time to wait for the 12V rail to stabilize.
@@ -229,19 +326,22 @@ impl DreamboPyControlLoop {
     #[pyo3(signature = (
         serialport,
         read_position_loop_period,
+        can_bus = String::from("can0"),
         allowed_retries = 5,
         stats_pub_period = None,
         voltage_rampup_timeout = Duration::from_secs(30),
     ))]
     fn new(
-        serialport: String,
+        serialport: Option<String>,
         read_position_loop_period: Duration,
+        can_bus: String,
         allowed_retries: u64,
         stats_pub_period: Option<Duration>,
         voltage_rampup_timeout: Duration,
     ) -> PyResult<Self> {
         let control_loop = DreamboControlLoop::new(
             serialport,
+            can_bus,
             read_position_loop_period,
             stats_pub_period,
             allowed_retries,
@@ -303,6 +403,38 @@ impl DreamboPyControlLoop {
     fn set_nose_position(&self, position: [f64; 3]) -> PyResult<()> {
         self.inner
             .push_command(MotorCommand::SetNose { position })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Set goal positions for the neck (3 values: yaw, pitch, roll).
+    fn set_neck_position(&self, position: [f64; 3]) -> PyResult<()> {
+        self.inner
+            .push_command(MotorCommand::SetNeck { position })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn set_neck_yaw_position(&self, position: f64) -> PyResult<()> {
+        self.inner
+            .push_command(MotorCommand::SetNeckYaw { position })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn set_neck_pitch_position(&self, position: f64) -> PyResult<()> {
+        self.inner
+            .push_command(MotorCommand::SetNeckPitch { position })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn set_neck_roll_position(&self, position: f64) -> PyResult<()> {
+        self.inner
+            .push_command(MotorCommand::SetNeckRoll { position })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Enable or disable the neck motors.
+    fn enable_neck(&self, enable: bool) -> PyResult<()> {
+        self.inner
+            .push_command(MotorCommand::EnableNeck { enable })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 

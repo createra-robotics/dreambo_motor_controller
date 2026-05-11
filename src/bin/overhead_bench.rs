@@ -10,7 +10,7 @@ fn main() {
     let serialport = "/dev/ttyACM0";
 
     {
-        let mut c = DreamboMotorController::new(serialport).unwrap();
+        let mut c = DreamboMotorController::new(Some(serialport), "can0").unwrap();
 
         let tic = std::time::Instant::now();
         for _ in 0..N {

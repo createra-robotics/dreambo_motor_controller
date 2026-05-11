@@ -13,6 +13,10 @@ struct Args {
     #[clap(short, long)]
     port: String,
 
+    /// CAN bus interface for neck Damiao motors
+    #[clap(long, default_value = "can0")]
+    can_bus: String,
+
     /// Frequency for reading positions
     #[clap(short, long)]
     read_frequency: f64,
@@ -25,7 +29,8 @@ fn main() {
     let args = Args::parse();
 
     let loop_controller = DreamboControlLoop::new(
-        args.port,
+        Some(args.port),
+        args.can_bus,
         Duration::from_secs_f64(1.0 / args.read_frequency),
         Some(Duration::from_secs(1)),
         5,
@@ -55,6 +60,7 @@ fn main() {
                     left_arm: [target_pos; 2],
                     right_arm: [target_pos; 2],
                     nose: [target_pos; 3],
+                    neck: [0.0; 3],
                     timestamp: 0.0,
                 },
             })

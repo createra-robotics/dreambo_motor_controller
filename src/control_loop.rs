@@ -30,6 +30,9 @@ pub struct DreamboTorsoPosition {
     pub right_arm: [f64; 2],
     #[pyo3(get)]
     pub nose: [f64; 3],
+    /// Neck joint positions in rad: [yaw, pitch, roll].
+    #[pyo3(get)]
+    pub neck: [f64; 3],
     #[pyo3(get)]
     pub timestamp: f64, // seconds since UNIX epoch
 }
@@ -81,14 +84,15 @@ where
 #[pymethods]
 impl DreamboTorsoPosition {
     #[new]
-    pub fn new(left_arm: Vec<f64>, right_arm: Vec<f64>, nose: Vec<f64>) -> Self {
-        if left_arm.len() != 2 || right_arm.len() != 2 || nose.len() != 3 {
-            panic!("Each arm must have 2 positions and the nose must have 3 positions.");
+    pub fn new(left_arm: Vec<f64>, right_arm: Vec<f64>, nose: Vec<f64>, neck: Vec<f64>) -> Self {
+        if left_arm.len() != 2 || right_arm.len() != 2 || nose.len() != 3 || neck.len() != 3 {
+            panic!("Each arm must have 2 positions, nose must have 3, neck must have 3.");
         }
         DreamboTorsoPosition {
             left_arm: [left_arm[0], left_arm[1]],
             right_arm: [right_arm[0], right_arm[1]],
             nose: [nose[0], nose[1], nose[2]],
+            neck: [neck[0], neck[1], neck[2]],
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::from_secs(0))
@@ -98,8 +102,8 @@ impl DreamboTorsoPosition {
 
     fn __repr__(&self) -> pyo3::PyResult<String> {
         Ok(format!(
-            "DreamboTorsoPosition(left_arm={:?}, right_arm={:?}, nose={:?}, timestamp={:.3})",
-            self.left_arm, self.right_arm, self.nose, self.timestamp
+            "DreamboTorsoPosition(left_arm={:?}, right_arm={:?}, nose={:?}, neck={:?}, timestamp={:.3})",
+            self.left_arm, self.right_arm, self.nose, self.neck, self.timestamp
         ))
     }
 }
@@ -130,6 +134,21 @@ pub enum MotorCommand {
     },
     SetNose {
         position: [f64; 3],
+    },
+    SetNeck {
+        position: [f64; 3],
+    },
+    SetNeckYaw {
+        position: f64,
+    },
+    SetNeckPitch {
+        position: f64,
+    },
+    SetNeckRoll {
+        position: f64,
+    },
+    EnableNeck {
+        enable: bool,
     },
     EnableTorque(),
     EnableTorqueOnIds {
@@ -250,7 +269,8 @@ impl std::fmt::Display for MotorError {
 
 impl DreamboControlLoop {
     pub fn new(
-        serialport: String,
+        serialport: Option<String>,
+        can_bus: String,
         read_position_loop_period: Duration,
         stats_pub_period: Option<Duration>,
         read_allowed_retries: u64,
@@ -273,85 +293,106 @@ impl DreamboControlLoop {
         });
         let last_stats_clone = last_stats.clone();
 
-        // Validate serial port based on operating system
-
-        // On Unix-like systems, check if the port path exists
-        #[cfg(not(windows))]
-        if !std::path::Path::new(&serialport).exists() {
-            return Err(MotorError::PortNotFound(serialport));
-        }
-        // On Windows, validate COM port format
-        #[cfg(windows)]
-        if !serialport.starts_with("COM") {
-            return Err(MotorError::PortNotFound(serialport));
-        }
-
-        let mut c = DreamboMotorController::new(serialport.as_str())
-            .map_err(|_| MotorError::CouldNotOpenPort(serialport.clone()))?;
-
-        match c.check_missing_ids() {
-            Ok(missing_ids) if missing_ids.len() == 7 => {
-                return Err(MotorError::NoPowerError());
+        // Validate serial port based on operating system, only when provided.
+        if let Some(ref p) = serialport {
+            #[cfg(not(windows))]
+            if !std::path::Path::new(p).exists() {
+                return Err(MotorError::PortNotFound(p.clone()));
             }
-            Ok(missing_ids) if !missing_ids.is_empty() => {
-                let id_to_name: HashMap<u8, String> = c
-                    .get_motor_name_id()
-                    .iter()
-                    .map(|(name, id)| (id.clone(), name.clone()))
-                    .collect();
-
-                let missing_motors: Vec<String> = missing_ids
-                    .iter()
-                    .map(|id| {
-                        id_to_name
-                            .get(id)
-                            .unwrap_or(&format!("Unknown({})", id))
-                            .clone()
-                    })
-                    .collect();
-                return Err(MotorError::MissingMotors(missing_motors));
+            #[cfg(windows)]
+            if !p.starts_with("COM") {
+                return Err(MotorError::PortNotFound(p.clone()));
             }
-            Ok(_) => {}
-            Err(_) => return Err(MotorError::CommunicationError()),
         }
 
-        // Wait until voltage is stable at the 12V rail
-        info!("Waiting for voltage to be stable at 12V...");
-        let mut current_voltage = with_retry(|| c.read_all_voltages(), read_allowed_retries)
-            .map_err(|_| MotorError::CommunicationError())?;
-        let start_time = SystemTime::now();
-        while current_voltage
-            .iter()
-            .any(|&v| v < MIN_VOLTAGE_TENTHS && start_time.elapsed().unwrap() < voltage_rampup_timeout)
-        {
-            std::thread::sleep(Duration::from_millis(100));
-            current_voltage = with_retry(|| c.read_all_voltages(), read_allowed_retries)
+        let mut c = DreamboMotorController::new(serialport.as_deref(), can_bus.as_str())
+            .map_err(|_| MotorError::CouldNotOpenPort(serialport.clone().unwrap_or_default()))?;
+
+        // Servo-bus presence check only runs when the Feetech serial port is
+        // configured. In neck-only mode we skip straight to the CAN ping.
+        if serialport.is_some() {
+            match c.check_missing_ids() {
+                Ok(missing_ids) if missing_ids.len() == 7 => {
+                    return Err(MotorError::NoPowerError());
+                }
+                Ok(missing_ids) if !missing_ids.is_empty() => {
+                    let id_to_name: HashMap<u8, String> = c
+                        .get_motor_name_id()
+                        .iter()
+                        .map(|(name, id)| (id.clone(), name.clone()))
+                        .collect();
+
+                    let missing_motors: Vec<String> = missing_ids
+                        .iter()
+                        .map(|id| {
+                            id_to_name
+                                .get(id)
+                                .unwrap_or(&format!("Unknown({})", id))
+                                .clone()
+                        })
+                        .collect();
+                    return Err(MotorError::MissingMotors(missing_motors));
+                }
+                Ok(_) => {}
+                Err(_) => return Err(MotorError::CommunicationError()),
+            }
+        }
+
+        // Ping each neck (Damiao/CAN) motor — fail to construct if any
+        // are unreachable, matching the servo-bus behaviour above.
+        let missing_neck = c.check_missing_neck_motors();
+        if !missing_neck.is_empty() {
+            return Err(MotorError::MissingMotors(missing_neck));
+        }
+
+        // Servo bus housekeeping — voltage ramp wait, reboot, initial torque
+        // read — only runs when the Feetech port is configured. In neck-only
+        // mode we skip straight to seeding the position cache.
+        if serialport.is_some() {
+            info!("Waiting for voltage to be stable at 12V...");
+            let mut current_voltage = with_retry(|| c.read_all_voltages(), read_allowed_retries)
+                .map_err(|_| MotorError::CommunicationError())?;
+            let start_time = SystemTime::now();
+            while current_voltage
+                .iter()
+                .any(|&v| v < MIN_VOLTAGE_TENTHS && start_time.elapsed().unwrap() < voltage_rampup_timeout)
+            {
+                std::thread::sleep(Duration::from_millis(100));
+                current_voltage = with_retry(|| c.read_all_voltages(), read_allowed_retries)
+                    .map_err(|_| MotorError::CommunicationError())?;
+            }
+            if current_voltage.iter().any(|&v| v < MIN_VOLTAGE_TENTHS) {
+                return Err(MotorError::VoltageRampUpTimeoutError(
+                    current_voltage.iter().cloned().min().unwrap_or(0),
+                    voltage_rampup_timeout,
+                ));
+            }
+            info!(
+                "Voltage is stable at ~12V: {:?} (took {:?})",
+                current_voltage,
+                start_time.elapsed().unwrap()
+            );
+
+            // Reboot all servo motors. (`reboot` is a no-op for neck-only mode
+            // but we keep the call site gated for symmetry.)
+            c.reboot(Duration::from_secs(1))
                 .map_err(|_| MotorError::CommunicationError())?;
         }
-        if current_voltage.iter().any(|&v| v < MIN_VOLTAGE_TENTHS) {
-            return Err(MotorError::VoltageRampUpTimeoutError(
-                current_voltage.iter().cloned().min().unwrap_or(0),
-                voltage_rampup_timeout,
-            ));
-        }
-        info!(
-            "Voltage is stable at ~12V: {:?} (took {:?})",
-            current_voltage,
-            start_time.elapsed().unwrap()
-        );
 
         let motor_name_id = c.get_motor_name_id();
-
-        // Reboot all motors
-        c.reboot(Duration::from_secs(1))
-            .map_err(|_| MotorError::CommunicationError())?;
 
         // Init last position by trying to read current positions
         // If the init fails, it probably means we have an hardware issue
         // so it's better to fail.
         let last_position = read_pos(&mut c, read_allowed_retries)?;
-        let last_torque = with_retry(|| c.is_torque_enabled(), read_allowed_retries)
-            .map_err(|_| MotorError::CommunicationError())?;
+        // In neck-only mode there are no servos to query torque state from;
+        // default to false (caller will enable explicitly).
+        let last_torque = if serialport.is_some() {
+            with_retry(|| c.is_torque_enabled(), read_allowed_retries)
+                .map_err(|_| MotorError::CommunicationError())?
+        } else {
+            false
+        };
 
         let last_position = Arc::new(Mutex::new(Ok(last_position)));
         let last_position_clone = last_position.clone();
@@ -629,6 +670,11 @@ fn handle_commands(
         SetRightArm { position } => controller.set_right_arm_position(position).map(|_| ()),
         SetArms { position } => controller.set_arms_position(position).map(|_| ()),
         SetNose { position } => controller.set_nose_position(position).map(|_| ()),
+        SetNeck { position } => controller.set_neck_position(position).map(|_| ()),
+        SetNeckYaw { position } => controller.set_neck_yaw_position(position).map(|_| ()),
+        SetNeckPitch { position } => controller.set_neck_pitch_position(position).map(|_| ()),
+        SetNeckRoll { position } => controller.set_neck_roll_position(position).map(|_| ()),
+        EnableNeck { enable } => controller.enable_neck(enable).map(|_| ()),
         EnableTorque() => {
             let res = controller.enable_torque();
             if res.is_ok()
@@ -690,17 +736,25 @@ pub fn read_pos(
     c: &mut DreamboMotorController,
     read_allowed_retries: u64,
 ) -> Result<DreamboTorsoPosition, MotorError> {
-    with_retry(|| c.read_all_positions(), read_allowed_retries)
-        .map(|positions| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-            DreamboTorsoPosition {
-                left_arm: [positions[0], positions[1]],
-                right_arm: [positions[2], positions[3]],
-                nose: [positions[4], positions[5], positions[6]],
-                timestamp: now.as_secs_f64(),
-            }
-        })
-        .map_err(|_| MotorError::CommunicationError())
+    let positions = if c.has_servo_bus() {
+        with_retry(|| c.read_all_positions(), read_allowed_retries)
+            .map_err(|_| MotorError::CommunicationError())?
+    } else {
+        [0.0_f64; 7]
+    };
+    // CAN reads (request_feedback per motor) aren't retried with the servo
+    // retry budget — a CAN timeout is reported up so the operator can act.
+    let neck = c
+        .read_neck_positions()
+        .map_err(|_| MotorError::CommunicationError())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+    Ok(DreamboTorsoPosition {
+        left_arm: [positions[0], positions[1]],
+        right_arm: [positions[2], positions[3]],
+        nose: [positions[4], positions[5], positions[6]],
+        neck,
+        timestamp: now.as_secs_f64(),
+    })
 }

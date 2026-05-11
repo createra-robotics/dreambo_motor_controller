@@ -50,6 +50,8 @@ cd `target/wheels`
 pip install dreambo_motor_controller...
 ```
 
+---
+
 ## Quickstart (Python)
 
 ```python
@@ -69,5 +71,16 @@ c.set_right_arm_position([-0.1, 0.0])
 c.set_nose_position([0.0, 0.0, 0.0])
 
 print(c.read_all_positions())
+```
+
+---
+
+## Examples
+
+```bash
+sudo ip link set can0 up type can bitrate 1000000
+cargo run --example homing
+
+#Optional flags: --can-bus can0, --speed 0.4, --tolerance 0.15, --kp <N> --kd <N>, --serial-port /dev/ttyACM0 (only if you want the Feetech bus opened too).
 ```
 
