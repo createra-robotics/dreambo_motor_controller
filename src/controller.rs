@@ -589,6 +589,120 @@ impl DreamboMotorController {
         Ok(())
     }
 
+    /// Make the current physical arm pose the new "radian zero" for all four
+    /// arm joints. Persistent across power cycles (writes EEPROM).
+    ///
+    /// This is the closest analogue to `neck_home()` we have for the Feetech
+    /// SM40BL arm motors. The Feetech firmware does not let us "zero" the
+    /// encoder directly; instead each motor exposes a **Position Offset**
+    /// EEPROM register (0x1F) that the firmware applies to the goal/present
+    /// position pipeline. By writing the current encoder absolute position
+    /// into that register we shift the logical zero to wherever the arm is
+    /// standing right now.
+    ///
+    /// Algorithm:
+    ///   1. Disable arm torque so the firmware does not fight the EEPROM
+    ///      change while it propagates.
+    ///   2. Read each motor's current `present_position` and `offset` (both
+    ///      already in radians; servocom 1.0.1 decodes them via
+    ///      `AnglePosition` / `Offset`). Assume the standard Feetech
+    ///      convention `present_register = encoder − offset` so the absolute
+    ///      encoder position is recovered as `encoder = present + offset`.
+    ///   3. Wrap each encoder into `[-π, +π]` (the offset register's range)
+    ///      and write it back to the offset register, with the EEPROM lock
+    ///      flipped off/on around the write.
+    ///   4. Read `present_position` back and require every joint to report
+    ///      within `verify_tol` of 0 rad. If verification fails, the firmware
+    ///      convention on this hardware is the opposite sign — bail out with
+    ///      a clear error rather than silently leave the arm mis-zeroed.
+    ///
+    /// Caller owns torque lifecycle: arms are left **torque-off** on the way
+    /// out so the operator can sanity-check the geometry by hand before
+    /// turning torque back on.
+    ///
+    /// Returns the observed post-write `present_position` (rad) for the four
+    /// joints in `[left_pitch, left_yaw, right_pitch, right_yaw]` order.
+    pub fn set_arm_home(
+        &mut self,
+        verify_tol: f64,
+    ) -> Result<[f64; 4], Box<dyn std::error::Error>> {
+        use std::f64::consts::PI;
+
+        if !(verify_tol > 0.0) {
+            return Err(format!(
+                "set_arm_home: verify_tol must be positive, got {}",
+                verify_tol
+            )
+            .into());
+        }
+
+        let port = port_or_err(&mut self.port)?;
+
+        // 1. Disable arm torque before touching EEPROM.
+        sm40bl::sync_write_torque_enable(&self.protocol, port, &ARM_IDS, &[false; 4])?;
+
+        // 2. Read the existing offset and where the arms currently report.
+        let present = sm40bl::sync_read_present_position(&self.protocol, port, &ARM_IDS)?;
+        let current_offset = sm40bl::sync_read_offset(&self.protocol, port, &ARM_IDS)?;
+        if present.len() != 4 || current_offset.len() != 4 {
+            return Err(format!(
+                "set_arm_home: incomplete arm response (present={} ids, offset={} ids)",
+                present.len(),
+                current_offset.len()
+            )
+            .into());
+        }
+
+        // 3. Encoder absolute = present + current_offset, wrapped to [-π, +π].
+        let wrap = |mut x: f64| -> f64 {
+            while x > PI {
+                x -= 2.0 * PI;
+            }
+            while x < -PI {
+                x += 2.0 * PI;
+            }
+            x
+        };
+        let mut new_offset = [0.0_f64; 4];
+        for i in 0..4 {
+            new_offset[i] = wrap(present[i] + current_offset[i]);
+        }
+
+        // 4. Unlock EEPROM, write offset, re-lock.
+        sm40bl::sync_write_lock(&self.protocol, port, &ARM_IDS, &[false; 4])?;
+        sm40bl::sync_write_offset(&self.protocol, port, &ARM_IDS, &new_offset)?;
+        sm40bl::sync_write_lock(&self.protocol, port, &ARM_IDS, &[true; 4])?;
+
+        // 5. Verify present_position now reports ~0 at every joint.
+        let observed = sm40bl::sync_read_present_position(&self.protocol, port, &ARM_IDS)?;
+        if observed.len() != 4 {
+            return Err(format!(
+                "set_arm_home: verify read returned {} values (expected 4)",
+                observed.len()
+            )
+            .into());
+        }
+        let mut obs = [0.0_f64; 4];
+        let mut worst = 0.0_f64;
+        for i in 0..4 {
+            obs[i] = observed[i];
+            worst = worst.max(observed[i].abs());
+        }
+        if worst > verify_tol {
+            return Err(format!(
+                "set_arm_home: verify failed — arm IDs {:?} now reading {:+.4?} rad \
+                 (expected ~0 within {:.4}). The Feetech offset sign convention on \
+                 this hardware may differ from the assumed `present = encoder - offset`. \
+                 EEPROM has been left in the new state; restore manually using \
+                 prior_offsets {:+.4?}, new_offsets {:+.4?}.",
+                ARM_IDS, obs, verify_tol, current_offset, new_offset
+            )
+            .into());
+        }
+
+        Ok(obs)
+    }
+
     pub fn enable_nose(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
         let port = port_or_err(&mut self.port)?;
         sts3025bl::sync_write_torque_enable(&self.protocol, port, &NOSE_IDS, &[enable; 3])?;

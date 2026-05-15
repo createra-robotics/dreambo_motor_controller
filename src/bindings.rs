@@ -306,6 +306,32 @@ impl DreamboMotorController {
         Ok(())
     }
 
+    /// Make the current physical arm pose the new "radian zero" by rewriting
+    /// each Feetech arm motor's Position Offset EEPROM register (0x1F).
+    /// Persistent across power cycles.
+    ///
+    /// Disables arm torque, reads the current present_position + offset for
+    /// every arm motor, computes a new offset equal to the recovered absolute
+    /// encoder position (so future `present_position` reads of this pose come
+    /// back as 0 rad and `goal_position = 0` writes leave the arm where it
+    /// sits now), unlocks EEPROM, writes the offset, re-locks, and verifies
+    /// by reading present_position back. Caller owns torque lifecycle — arms
+    /// are left **torque-off** on exit.
+    ///
+    /// Returns the observed post-write `present_position` (rad) for the four
+    /// joints: `[left_pitch, left_yaw, right_pitch, right_yaw]`. Raises
+    /// `RuntimeError` when verification fails (within `verify_tol` rad of 0)
+    /// or any bus call errors.
+    #[pyo3(signature = (verify_tol = 0.05))]
+    fn set_arm_home(&self, verify_tol: f64) -> PyResult<[f64; 4]> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .set_arm_home(verify_tol)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Enable or disable the nose motors.
     fn enable_nose(&self, enable: bool) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {
