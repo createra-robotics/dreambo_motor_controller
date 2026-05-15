@@ -353,17 +353,12 @@ impl DreamboMotorController {
         &mut self,
         position: [f64; 3],
     ) -> Result<[f64; 3], Box<dyn std::error::Error>> {
-        let mut observed = [0.0_f64; 3];
-        for i in 0..3 {
-            let q = clamp_neck_position(i, position[i]);
-            self.neck_setpoints[i].q = q as f32;
-            let setpoint = ControlSetpoint::Mit(self.neck_setpoints[i]);
-            let state = self.neck_motors[i]
-                .control(&mut self.can_bus, &setpoint)
-                .map_err(|e| format!("set_neck_position({}): {}", NECK_NAMES[i], e))?;
-            observed[i] = state.position as f64;
-        }
-        Ok(observed)
+        let clamped = [
+            clamp_neck_position(0, position[0]),
+            clamp_neck_position(1, position[1]),
+            clamp_neck_position(2, position[2]),
+        ];
+        self.command_neck_mit(clamped, "set_neck_position")
     }
 
     pub fn set_neck_yaw_position(
@@ -415,6 +410,146 @@ impl DreamboMotorController {
         self.neck_setpoints[index].kp = kp;
         self.neck_setpoints[index].kd = kd;
         Ok(())
+    }
+
+    /// Home all 3 neck joints to the nearest physical zero.
+    ///
+    /// After a power cycle the Damiao multi-turn counter resets, so the
+    /// reported angle for a joint can land anywhere on the circle even
+    /// though the joint hasn't moved. Commanding "go to 0" naively would
+    /// then drive the head a full turn. Instead this routine snaps each
+    /// goal to the **nearest multiple of 2π** of the joint's current
+    /// reported position — physically equivalent to zero, but guaranteed
+    /// within ±π of where the joint already is.
+    ///
+    /// Behaviour:
+    /// 1. Reads the current position of each neck joint.
+    /// 2. Computes `goal[i] = round(start[i] / 2π) * 2π`.
+    /// 3. Applies optional kp/kd overrides to all three joints (`None`
+    ///    keeps the current per-joint gain).
+    /// 4. Enables neck torque if it wasn't already (does *not* disable on
+    ///    exit — caller owns torque lifecycle, same as `set_neck_position`).
+    /// 5. Ramps each joint's commanded position toward its goal at
+    ///    `speed` rad/s (10 ms control period). Targets are held at the
+    ///    goal once they arrive.
+    /// 6. Returns `Ok(observed)` once every joint is within `tolerance`
+    ///    rad of its goal; returns `Err(...)` on timeout.
+    ///
+    /// Ramp targets bypass `NECK_POSITION_LIMITS` clamping because the
+    /// targets are in the motor-reported (2π-shifted) frame and can fall
+    /// outside the joint-space envelope even though the physical pose is
+    /// inside it. Once homing settles, the firmware reports the homed
+    /// zero and subsequent `set_neck_position` calls clamp normally.
+    pub fn neck_home(
+        &mut self,
+        speed: f64,
+        tolerance: f64,
+        kp: Option<f32>,
+        kd: Option<f32>,
+    ) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+        const TWO_PI: f64 = 2.0 * std::f64::consts::PI;
+        const DT: Duration = Duration::from_millis(10);
+
+        if !(speed > 0.0) {
+            return Err(format!("neck_home: speed must be positive, got {}", speed).into());
+        }
+        if !(tolerance > 0.0) {
+            return Err(
+                format!("neck_home: tolerance must be positive, got {}", tolerance).into(),
+            );
+        }
+
+        if kp.is_some() || kd.is_some() {
+            for i in 0..3 {
+                if let Some(v) = kp {
+                    self.neck_setpoints[i].kp = v;
+                }
+                if let Some(v) = kd {
+                    self.neck_setpoints[i].kd = v;
+                }
+            }
+        }
+
+        let start = self.read_neck_positions()?;
+        let mut goals = [0.0_f64; 3];
+        for i in 0..3 {
+            goals[i] = (start[i] / TWO_PI).round() * TWO_PI;
+        }
+
+        if !self.neck_torque_enabled {
+            self.enable_neck(true)?;
+        }
+
+        let mut targets = start;
+        let step = speed * DT.as_secs_f64();
+        let max_distance = (0..3)
+            .map(|i| (start[i] - goals[i]).abs())
+            .fold(0.0_f64, f64::max);
+        let max_iters = (max_distance / step) as usize + 2_000;
+
+        let mut settled = [false; 3];
+        let mut observed = start;
+
+        for _ in 0..max_iters {
+            for j in 0..3 {
+                if settled[j] {
+                    continue;
+                }
+                let diff = targets[j] - goals[j];
+                if diff > step {
+                    targets[j] -= step;
+                } else if diff < -step {
+                    targets[j] += step;
+                } else {
+                    targets[j] = goals[j];
+                }
+            }
+
+            observed = self.command_neck_mit(targets, "neck_home")?;
+
+            for j in 0..3 {
+                if !settled[j]
+                    && (targets[j] - goals[j]).abs() < f64::EPSILON
+                    && (observed[j] - goals[j]).abs() < tolerance
+                {
+                    settled[j] = true;
+                }
+            }
+
+            if settled.iter().all(|&s| s) {
+                return Ok(observed);
+            }
+
+            std::thread::sleep(DT);
+        }
+
+        Err(format!(
+            "neck_home: timed out before settling. observed={:?}, goals={:?}, settled={:?}",
+            observed, goals, settled
+        )
+        .into())
+    }
+
+    /// Send an MIT setpoint to all three neck joints using the current
+    /// per-joint kp/kd, and return the position read back from each reply.
+    /// The `position` array is sent verbatim — callers that need the
+    /// joint-space safety clamp must apply `clamp_neck_position` first.
+    /// `context` is used to tag any per-joint error message.
+    fn command_neck_mit(
+        &mut self,
+        position: [f64; 3],
+        context: &str,
+    ) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+        let mut observed = [0.0_f64; 3];
+        for i in 0..3 {
+            self.neck_setpoints[i].q = position[i] as f32;
+            let setpoint = ControlSetpoint::Mit(self.neck_setpoints[i]);
+            let state = self.neck_motors[i]
+                .control(&mut self.can_bus, &setpoint)
+                .map_err(|e| format!("{}({}): {}", context, NECK_NAMES[i], e))?;
+            observed[i] = state.position as f64;
+        }
+        Ok(observed)
     }
 
     pub fn is_torque_enabled(&mut self) -> Result<bool, Box<dyn std::error::Error>> {

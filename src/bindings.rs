@@ -242,6 +242,38 @@ impl DreamboMotorController {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
+    /// Home the 3 neck joints to the nearest physical zero.
+    ///
+    /// Snaps each goal to the nearest multiple of 2π of the joint's current
+    /// reported position — after a power cycle the Damiao multi-turn counter
+    /// resets, so commanding "go to 0" naively could spin the head a full
+    /// turn. Rounding keeps travel within ±π and lands at a physically
+    /// equivalent zero.
+    ///
+    /// Enables neck torque if it isn't already (does **not** disable on
+    /// exit — caller owns torque lifecycle). Ramps at `speed` rad/s on a
+    /// 10 ms cycle and returns the observed positions once every joint is
+    /// within `tolerance` rad of its goal. Raises on timeout.
+    ///
+    /// `kp` / `kd`: optional overrides applied to all three joints for the
+    /// duration of homing (and left in place afterwards). `None` keeps the
+    /// per-joint defaults baked into the controller.
+    #[pyo3(signature = (speed = 0.4, tolerance = 0.15, kp = None, kd = None))]
+    fn neck_home(
+        &self,
+        speed: f64,
+        tolerance: f64,
+        kp: Option<f32>,
+        kd: Option<f32>,
+    ) -> PyResult<[f64; 3]> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .neck_home(speed, tolerance, kp, kd)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Enable or disable the neck motors. On enable, also forces each motor
     /// into MIT control mode.
     fn enable_neck(&self, enable: bool) -> PyResult<()> {
