@@ -332,6 +332,30 @@ impl DreamboMotorController {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
+    /// Make the current physical neck pose the new "radian zero" by sending
+    /// the Damiao `set_zero` FF-prefix command to each of the three neck
+    /// motors. Persistent across power cycles (the new zero is stored on
+    /// motor flash).
+    ///
+    /// Neck-side analogue of `set_arm_home`. Disables neck torque first so
+    /// the firmware does not fight the zero write, sends set-zero to yaw /
+    /// pitch / roll, then reads each joint back and verifies it reports
+    /// within `verify_tol` rad of 0. Caller owns torque lifecycle — the
+    /// neck is left **torque-off** on exit.
+    ///
+    /// Returns the observed post-zero positions (rad) in `[yaw, pitch, roll]`
+    /// order. Raises `RuntimeError` when verification fails or any CAN call
+    /// errors.
+    #[pyo3(signature = (verify_tol = 0.05))]
+    fn set_neck_home(&self, verify_tol: f64) -> PyResult<[f64; 3]> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock motor controller")
+        })?;
+        inner
+            .set_neck_home(verify_tol)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Enable or disable the nose motors.
     fn enable_nose(&self, enable: bool) -> PyResult<()> {
         let mut inner = self.inner.lock().map_err(|_| {

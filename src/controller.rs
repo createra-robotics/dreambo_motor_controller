@@ -703,6 +703,69 @@ impl DreamboMotorController {
         Ok(obs)
     }
 
+    /// Make the current physical neck pose the new "radian zero" for all
+    /// three neck joints. Persistent across power cycles (Damiao firmware
+    /// stores the new zero in motor flash).
+    ///
+    /// This is the neck-side analogue of [`set_arm_home`]. Where the Feetech
+    /// arms expose a Position Offset EEPROM register that we shift, the
+    /// Damiao firmware exposes a single `0xFF ... 0xFE` FF-prefix command
+    /// that snaps the current output-shaft position to zero on the motor
+    /// itself — no register dance required.
+    ///
+    /// Algorithm:
+    ///   1. Disable neck torque so the firmware does not fight the zero
+    ///      write while it commits (also clears the in-memory torque flag).
+    ///   2. Send the set-zero command to each of the three neck motors.
+    ///   3. Read each joint's position back via feedback request and require
+    ///      every joint to report within `verify_tol` rad of 0. If
+    ///      verification fails, bail out rather than silently leave the
+    ///      neck mis-zeroed.
+    ///
+    /// Caller owns torque lifecycle: the neck is left **torque-off** on the
+    /// way out so the operator can sanity-check the geometry by hand before
+    /// re-enabling torque.
+    ///
+    /// Returns the observed post-zero positions (rad) in `[yaw, pitch, roll]`
+    /// order.
+    ///
+    /// [`set_arm_home`]: Self::set_arm_home
+    pub fn set_neck_home(
+        &mut self,
+        verify_tol: f64,
+    ) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+        if !(verify_tol > 0.0) {
+            return Err(format!(
+                "set_neck_home: verify_tol must be positive, got {}",
+                verify_tol
+            )
+            .into());
+        }
+
+        self.enable_neck(false)?;
+
+        for (i, dm) in self.neck_motors.iter().enumerate() {
+            dm.set_zero(&mut self.can_bus)
+                .map_err(|e| format!("set_neck_home({}): {}", NECK_NAMES[i], e))?;
+        }
+
+        let observed = self.read_neck_positions()?;
+        let worst = observed.iter().copied().fold(0.0_f64, |w, v| w.max(v.abs()));
+        if worst > verify_tol {
+            return Err(format!(
+                "set_neck_home: verify failed — neck joints {:?} now reading \
+                 {:+.4?} rad (expected ~0 within {:.4}). The new zero has \
+                 already been written to motor flash; re-run from the correct \
+                 pose to overwrite, or power-cycle to fall back to the prior \
+                 calibration if the new zero was stored to RAM only.",
+                NECK_NAMES, observed, verify_tol
+            )
+            .into());
+        }
+
+        Ok(observed)
+    }
+
     pub fn enable_nose(&mut self, enable: bool) -> Result<(), Box<dyn std::error::Error>> {
         let port = port_or_err(&mut self.port)?;
         sts3025bl::sync_write_torque_enable(&self.protocol, port, &NOSE_IDS, &[enable; 3])?;
